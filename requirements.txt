@@ -1,0 +1,15 @@
+numpy>=1.26
+pandas>=2.2
+scipy>=1.12
+scikit-learn>=1.4
+cvxpy>=1.5
+yfinance>=0.2.40
+simfin>=1.0
+vectorbt>=0.26
+ib_insync>=0.9.86
+matplotlib>=3.8
+seaborn>=0.13
+duckdb>=0.10
+pyarrow>=15
+python-dotenv>=1.0
+tqdm>=4.66
