@@ -101,14 +101,18 @@ class Broker:
             logging.warning("price failed for %s: %s", ticker, e)
             return None
 
-    def net_liq_usd(self) -> float | None:
+    def net_liq(self) -> tuple[float, str] | None:
+        """(value, currency) of NetLiquidation — informational only (account base ccy;
+        commingled if the account is shared with other strategies). Not used for sizing."""
         try:
-            for row in self.ib.accountSummary():
-                if row.tag == "NetLiquidation" and row.currency in ("USD", "BASE"):
-                    return float(row.value)
+            rows = [r for r in self.ib.accountSummary() if r.tag == "NetLiquidation"]
+            if not rows:
+                return None
+            r = next((r for r in rows if r.currency in ("USD", "BASE")), rows[0])
+            return float(r.value), r.currency
         except Exception as e:  # noqa: BLE001
             logging.warning("net_liq failed: %s", e)
-        return None
+            return None
 
     def ib_positions(self) -> dict[str, float]:
         out: dict[str, float] = {}
@@ -120,23 +124,38 @@ class Broker:
         return out
 
     # ---- orders ----
-    def order(self, ticker: str, action: str, shares: int) -> bool:
-        """Place a market order (BUY/SELL). Honours dry_run (logs, places nothing)."""
+    # order-status buckets: live = filled or will fill; dead = will not fill
+    _DEAD = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
+
+    def order(self, ticker: str, action: str, shares: int, wait: float = 4.0) -> dict:
+        """Place a market order (BUY/SELL). Returns
+            {ok, status, fill_price}
+        ok=True if the order is live (filled or queued to fill); False if rejected/cancelled.
+        fill_price is the actual avg fill when already filled, else None (caller falls back to
+        the mark). Honours dry_run (logs, places nothing)."""
         if shares <= 0:
-            return False
+            return {"ok": False, "status": "zero_qty", "fill_price": None}
         if self.dry_run:
             logging.info("[DRY RUN] %s %d %s", action, shares, ticker)
-            return True
+            return {"ok": True, "status": "dryrun", "fill_price": None}
         from ib_insync import MarketOrder
         c = self.qualify(ticker)
         if c is None:
             logging.warning("cannot order %s — contract unresolved", ticker)
-            return False
+            return {"ok": False, "status": "unresolved", "fill_price": None}
         try:
-            self.ib.placeOrder(c, MarketOrder(action, shares))
-            self.ib.sleep(1)
-            logging.info("%s %d %s placed", action, shares, ticker)
-            return True
+            order = MarketOrder(action, shares)
+            order.tif = "DAY"                      # explicit — avoids the preset TIF cancel/resubmit
+            trade = self.ib.placeOrder(c, order)
+            self.ib.sleep(wait)                    # let it fill (RTH) or reach PreSubmitted (queued)
+            st = trade.orderStatus.status
+            if st in self._DEAD:
+                logging.warning("%s %d %s NOT live (status=%s) — not recorded", action, shares, ticker, st)
+                return {"ok": False, "status": st, "fill_price": None}
+            fill = trade.orderStatus.avgFillPrice or None
+            logging.info("%s %d %s -> %s%s", action, shares, ticker, st,
+                         f" @ {fill}" if fill else " (queued, fills at next open)")
+            return {"ok": True, "status": st, "fill_price": float(fill) if fill else None}
         except Exception as e:  # noqa: BLE001
             logging.error("order failed %s %s %d: %s", action, ticker, shares, e)
-            return False
+            return {"ok": False, "status": "error", "fill_price": None}

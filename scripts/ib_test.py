@@ -32,7 +32,8 @@ def main(do_order: bool = False) -> None:
         return
     try:
         print("\n=== Account ===")
-        print(f"  NetLiquidation (USD): {broker.net_liq_usd()}")
+        nl = broker.net_liq()
+        print(f"  NetLiquidation: {f'{nl[0]:,.0f} {nl[1]}' if nl else 'n/a'}  (commingled/base ccy — not used by strategy)")
         print(f"  Open positions: {broker.ib_positions() or '(none)'}")
 
         print("\n=== Contract resolution (US + Europe) ===")

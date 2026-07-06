@@ -78,9 +78,10 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
             pos.entry_date = today                      # keep: restart the clock
             holds.append(pos.ticker)
         else:
-            px = marks.get(pos.ticker, pos.entry_price)
             f = fx.get(pos.currency, pos.entry_fx)
-            if broker.order(pos.ticker, "SELL", int(pos.shares)):
+            res = broker.order(pos.ticker, "SELL", int(pos.shares))
+            if res["ok"]:
+                px = res["fill_price"] or marks.get(pos.ticker, pos.entry_price)
                 state.close_position(pos.ticker, px, f, today, reason="clock: dropped from band")
                 sells.append(pos.ticker)
 
@@ -99,11 +100,13 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
             shares = _size_shares(t, price_local, f, vol, cfg, gross)
             if shares <= 0:
                 continue
-            if broker.order(t, "BUY", shares):
+            res = broker.order(t, "BUY", shares)
+            if res["ok"]:
+                entry = res["fill_price"] or price_local     # actual fill (RTH) or mark (queued/dry)
                 state.open_position(Position(
-                    ticker=t, shares=shares, entry_price=price_local, entry_date=today,
+                    ticker=t, shares=shares, entry_price=entry, entry_date=today,
                     entry_fx=f, currency=ccy.get(t, "USD")))
-                buys.append((t, shares, round(shares * price_local * f, 0)))
+                buys.append((t, shares, round(shares * entry * f, 0)))
                 held.add(t)
                 n_buys -= 1
 
