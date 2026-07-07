@@ -271,7 +271,8 @@ def load_yfinance(
 # ~10/sec; companyfacts is one request per ticker (all tags at once) and is cached
 # to disk, so a full universe is a one-off ~1 min pull then instant.
 _EDGAR_CACHE = ROOT / "data" / "edgar_cache"
-_SEC_UA = os.getenv("SEC_USER_AGENT", "algo_trading research nicolas.greiner.1@gmail.com")
+# SEC requires a descriptive User-Agent with a contact email — set SEC_USER_AGENT in .env.
+_SEC_UA = os.getenv("SEC_USER_AGENT", "algo_trading research your-email@example.com")
 _SEC_MIN_INTERVAL = 0.12   # seconds between SEC calls (< 10 req/s)
 _sec_last_call = [0.0]
 
