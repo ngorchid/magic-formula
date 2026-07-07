@@ -10,22 +10,28 @@ and places NO strategy orders, so there is nothing to undo.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv  # noqa: E402
 from paper.broker import Broker, ib_contract_spec  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+load_dotenv(ROOT / ".env")
 
 # a spread of US + European names — the EU ones exercise the exchange/currency mapping
 TEST_TICKERS = ["AAPL", "NVDA", "SAP.DE", "MC.PA", "ASML.AS", "SIE.DE", "NESN.SW", "SHEL.L"]
 
 
 def main(do_order: bool = False) -> None:
-    broker = Broker(host="127.0.0.1", port=7497, client_id=5, dry_run=False)
+    broker = Broker(host=os.getenv("IB_HOST", "127.0.0.1"),
+                    port=int(os.getenv("IB_PORT", "7497")),
+                    client_id=int(os.getenv("IB_CLIENT_ID", "5")),
+                    dry_run=False)
     if not broker.connect():
         logging.error("Could not connect. Is IB Gateway (paper) running on port 7497 "
                       "with the API enabled and 127.0.0.1 trusted?")
@@ -37,18 +43,21 @@ def main(do_order: bool = False) -> None:
         print(f"  Open positions: {broker.ib_positions() or '(none)'}")
 
         print("\n=== Contract resolution (US + Europe) ===")
+        print("  (qualify = what the strategy needs for orders; IB price is informational —")
+        print("   strategy marks come from yfinance, so a missing IB price is fine)")
         ok, bad = [], []
         for t in TEST_TICKERS:
             sym, ccy, exch = ib_contract_spec(t)
-            c = broker.qualify(t)
-            px = broker.price(t) if c else None
-            if c and px:
-                print(f"  ✓ {t:9s} -> {sym} {ccy}@{exch or 'SMART'}  last {px}")
+            c = broker.qualify(t)                       # the real test: does the contract resolve?
+            if c:
+                px = broker.price(t)                    # informational — may fail if MD session busy
+                pxs = f"IB last {px}" if px else "IB price n/a (market-data session busy — OK)"
+                print(f"  ✓ {t:9s} -> {sym} {ccy}@{exch or 'SMART'}  qualified; {pxs}")
                 ok.append(t)
             else:
-                print(f"  ✗ {t:9s} -> {sym} {ccy}@{exch or 'SMART'}  UNRESOLVED")
+                print(f"  ✗ {t:9s} -> {sym} {ccy}@{exch or 'SMART'}  QUALIFY FAILED")
                 bad.append(t)
-        print(f"\n  resolved {len(ok)}/{len(TEST_TICKERS)}"
+        print(f"\n  qualified {len(ok)}/{len(TEST_TICKERS)}"
               + (f"; FAILED: {bad} (need mapping fixes)" if bad else " — all good"))
 
         if do_order and ok:

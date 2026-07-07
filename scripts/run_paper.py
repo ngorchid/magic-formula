@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -128,7 +129,10 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     panels = _refresh_marks(panels, refresh_set)
     fx = _fx_to_usd(set(panels["currency"].values()))
 
-    broker = Broker(host="127.0.0.1", port=7497, client_id=5, dry_run=dry_run)
+    broker = Broker(host=os.getenv("IB_HOST", "127.0.0.1"),
+                    port=int(os.getenv("IB_PORT", "7497")),
+                    client_id=int(os.getenv("IB_CLIENT_ID", "5")),
+                    dry_run=dry_run)
     if not dry_run:
         if not broker.connect():
             logging.error("Could not connect to IB — aborting run.")
