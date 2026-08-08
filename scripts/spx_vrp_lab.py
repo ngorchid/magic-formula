@@ -58,11 +58,25 @@ class Config:
     stop_mult: float = 2.0          # close when value >= 2x credit; <=0 disables
     time_stop_dte: int = 21
     cost_pts: float = 0.50          # assumed half-spread per leg per side, index points
+    # MARKET-WIDE REGIME GATE — the live strategy's `regime_open(ratio, threshold)`: sell only
+    # in contango. None disables it. `regime_continuous` also CLOSES an open spread if the
+    # gate shuts mid-hold; entry-only gating cannot protect a position already on, which is
+    # why the daily-rebalanced variance-swap proxy looked far more protective than reality.
+    regime_thr: float | None = None
+    regime_continuous: bool = False
 
     @property
     def label(self) -> str:
         s = "no-stop" if self.stop_mult <= 0 else f"{self.stop_mult:g}x"
         return f"{self.short_delta:.2f}/{self.long_delta:.2f} vrp{self.vrp_min:.2f} {s}"
+
+
+def regime_ratio() -> pd.Series:
+    """VIX/VIX3M, lagged one day (decided on yesterday's close, applied today)."""
+    import yfinance as yf
+    tk = yf.download(["^VIX", "^VIX3M"], start="2013-01-01", auto_adjust=False,
+                     progress=False)["Close"].dropna()
+    return (tk["^VIX"] / tk["^VIX3M"]).shift(1)
 
 
 def load() -> tuple[pd.DataFrame, pd.Series, pd.Series]:
@@ -118,7 +132,10 @@ def mark(chain_by_date: dict, date, contract, strike, expiry, cp, spot, r, last_
     return (float(px) if np.isfinite(px) else None), last_iv
 
 
-def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series) -> pd.DataFrame:
+def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
+        ratio: pd.Series | None = None) -> pd.DataFrame:
+    if cfg.regime_thr is not None and ratio is None:
+        ratio = regime_ratio()
     dates = np.array(sorted(ch.date.unique()))
     by_date_full = {d: g for d, g in ch.groupby("date")}
     lut = {d: dict(zip(g.contract, zip(g.close, g.iv))) for d, g in ch.groupby("date")}
@@ -146,6 +163,11 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series) -> pd.Da
                     reason = "stop"
                 elif dte <= cfg.time_stop_dte:
                     reason = "time"
+                if (reason is None and cfg.regime_continuous and cfg.regime_thr is not None
+                        and ratio is not None):
+                    rr = ratio.get(d)
+                    if rr is not None and np.isfinite(rr) and rr >= cfg.regime_thr:
+                        reason = "regime"
                 if dte <= 0:
                     val = max(0.0, open_pos["ks"] - S) - max(0.0, open_pos["kl"] - S)
                     reason = "expiry"
@@ -160,6 +182,10 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series) -> pd.Da
                     open_pos = None
 
         if open_pos is None:
+            if cfg.regime_thr is not None and ratio is not None:
+                rr = ratio.get(d)
+                if rr is None or not np.isfinite(rr) or rr >= cfg.regime_thr:
+                    continue
             v = vrp.get(d)
             if v is None or not np.isfinite(v) or v < cfg.vrp_min:
                 continue
@@ -191,7 +217,8 @@ def stats(t: pd.DataFrame, cfg: Config) -> dict:
             "sharpe": pnl.mean() / pnl.std() * np.sqrt(len(t) / yrs) if pnl.std() else np.nan,
             "maxDD": dd, "worst": pnl.min(),
             "profit%": (t.reason == "profit").mean(), "stop%": (t.reason == "stop").mean(),
-            "time%": (t.reason == "time").mean(), "exp%": (t.reason == "expiry").mean()}
+            "time%": (t.reason == "time").mean(), "exp%": (t.reason == "expiry").mean(),
+            "regime%": (t.reason == "regime").mean()}
 
 
 def table(rows: list[dict], title: str) -> None:

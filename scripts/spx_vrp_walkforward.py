@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 warnings.filterwarnings("ignore")
 
-from spx_vrp_lab import Config, load, run  # noqa: E402
+from spx_vrp_lab import Config, load, run, regime_ratio  # noqa: E402
 
 OUT = ROOT / "results" / "spx_vrp"
 
@@ -42,6 +42,7 @@ VRP_GRID = [-99.0, 0.0, 0.01, 0.02, 0.03, 0.05]
 DELTA_GRID = [(0.30, 0.20), (0.25, 0.15), (0.20, 0.10), (0.16, 0.10),
               (0.16, 0.08), (0.12, 0.06), (0.10, 0.05)]
 COST = 0.25          # index points per leg per side; the middle of the plausible band
+REGIME_THR = 1.00    # the LIVE market-wide gate (VIX/VIX3M < 1.00). Earlier runs omitted it.
 BASELINE = (0.02, (0.16, 0.10))
 
 
@@ -63,14 +64,15 @@ def sharpe(t: pd.DataFrame) -> float:
     return p.mean() / p.std() * np.sqrt(len(t) / yrs) if p.std() else np.nan
 
 
-def build_grid(ch, spot, vrp) -> dict:
+def build_grid(ch, spot, vrp, ratio) -> dict:
     """Run each cell ONCE over full history; slice by date afterwards. Valid because a
     cell's trade list is fixed — only the date window changes between folds."""
     grid = {}
     for v in VRP_GRID:
         for d in DELTA_GRID:
-            cfg = Config(vrp_min=v, short_delta=d[0], long_delta=d[1], stop_mult=0.0)
-            t = run(cfg, ch, spot, vrp)
+            cfg = Config(vrp_min=v, short_delta=d[0], long_delta=d[1], stop_mult=0.0,
+                         regime_thr=REGIME_THR)
+            t = run(cfg, ch, spot, vrp, ratio)
             grid[(v, d)] = t
             print(f"    {cell_label(v,d):22s} {len(t):>4d} trades", flush=True)
     return grid
@@ -83,8 +85,10 @@ def slice_(t, lo, hi):
 def main() -> None:
     print("Loading chain...")
     ch, spot, vrp = load()
-    print(f"Running {len(VRP_GRID)*len(DELTA_GRID)} grid cells over full history...")
-    grid = build_grid(ch, spot, vrp)
+    ratio = regime_ratio()
+    print(f"Running {len(VRP_GRID)*len(DELTA_GRID)} grid cells over full history "
+          f"(LIVE spec: regime gate VIX/VIX3M < {REGIME_THR:.2f})...")
+    grid = build_grid(ch, spot, vrp, ratio)
 
     # ---------- 1. single split ----------
     SPLIT = pd.Timestamp("2020-01-01")
@@ -148,7 +152,8 @@ def main() -> None:
         print(f"  {lab:32s} n={len(s):>4d}  total ${s.sum():>9,.0f}  "
               f"$/trade {s.mean():>7,.0f}  Sharpe {shp:>+5.2f}")
 
-    print("\n  NB cost fixed at 0.25 pts/leg/side (assumed — ohlcv-1d has no quotes).")
+    print(f"\n  NB LIVE spec: market-wide regime gate VIX/VIX3M < {REGIME_THR:.2f} applied at entry.")
+    print("  NB cost fixed at 0.25 pts/leg/side (assumed — ohlcv-1d has no quotes).")
     print("  Stop held OFF throughout; it is a separate monotone result.")
 
 
