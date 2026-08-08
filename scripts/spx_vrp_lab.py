@@ -64,6 +64,7 @@ class Config:
     # why the daily-rebalanced variance-swap proxy looked far more protective than reality.
     regime_thr: float | None = None
     regime_continuous: bool = False
+    cp: str = "P"                   # "P" = bull put spread (default), "C" = bear call spread
 
     @property
     def label(self) -> str:
@@ -92,19 +93,24 @@ def load() -> tuple[pd.DataFrame, pd.Series, pd.Series]:
 
 
 def pick_legs(day: pd.DataFrame, cfg: Config):
-    """Nearest-delta short and long put on a common expiry."""
-    p = day[(day.cp == "P") & day.dte.between(cfg.dte_lo, cfg.dte_hi)]
+    """Nearest-delta short and long leg on a common expiry.
+
+    Puts have negative delta and the long wing sits at a LOWER strike; calls have positive
+    delta and the long wing sits HIGHER. Both are credit spreads with capped loss.
+    """
+    sgn = -1.0 if cfg.cp == "P" else 1.0
+    p = day[(day.cp == cfg.cp) & day.dte.between(cfg.dte_lo, cfg.dte_hi)]
     if p.empty:
         return None
     best = None
     for exp, g in p.groupby("expiry"):
-        s = g.iloc[(g.delta + cfg.short_delta).abs().argsort()[:1]]
-        l = g.iloc[(g.delta + cfg.long_delta).abs().argsort()[:1]]
+        s = g.iloc[(g.delta - sgn * cfg.short_delta).abs().argsort()[:1]]
+        l = g.iloc[(g.delta - sgn * cfg.long_delta).abs().argsort()[:1]]
         if s.empty or l.empty:
             continue
         s, l = s.iloc[0], l.iloc[0]
-        if l.strike >= s.strike:                       # long wing must be further OTM
-            continue
+        if (l.strike >= s.strike) if cfg.cp == "P" else (l.strike <= s.strike):
+            continue                                   # long wing must be further OTM
         if abs(abs(s.delta) - cfg.short_delta) > 0.05: # refuse a bad delta match
             continue
         if abs(abs(l.delta) - cfg.long_delta) > 0.05:
@@ -149,8 +155,8 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
         r = rates.get(d, 0.02)
 
         if open_pos is not None:
-            ps, iv_s = mark(lut, d, open_pos["cs"], open_pos["ks"], open_pos["exp"], "P", S, r, open_pos["iv_s"])
-            pl, iv_l = mark(lut, d, open_pos["cl"], open_pos["kl"], open_pos["exp"], "P", S, r, open_pos["iv_l"])
+            ps, iv_s = mark(lut, d, open_pos["cs"], open_pos["ks"], open_pos["exp"], open_pos["cp"], S, r, open_pos["iv_s"])
+            pl, iv_l = mark(lut, d, open_pos["cl"], open_pos["kl"], open_pos["exp"], open_pos["cp"], S, r, open_pos["iv_l"])
             open_pos["iv_s"], open_pos["iv_l"] = iv_s, iv_l
             dte = (open_pos["exp"] - d).days
             if ps is not None and pl is not None:
@@ -169,13 +175,16 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
                     if rr is not None and np.isfinite(rr) and rr >= cfg.regime_thr:
                         reason = "regime"
                 if dte <= 0:
-                    val = max(0.0, open_pos["ks"] - S) - max(0.0, open_pos["kl"] - S)
+                    if open_pos["cp"] == "P":
+                        val = max(0.0, open_pos["ks"] - S) - max(0.0, open_pos["kl"] - S)
+                    else:
+                        val = max(0.0, S - open_pos["ks"]) - max(0.0, S - open_pos["kl"])
                     reason = "expiry"
                 if reason:
                     pnl = (open_pos["credit"] - val) * 100 - 4 * cfg.cost_pts * 100
                     trades.append({**{k: open_pos[k] for k in
                                       ("entry_date", "exp", "ks", "kl", "credit", "peak",
-                                       "ds", "dl", "vrp")},
+                                       "ds", "dl", "vrp", "cp")},
                                    "exit_date": d, "exit_val": val, "reason": reason,
                                    "pnl": pnl,
                                    "peak_mult": open_pos["peak"] / open_pos["credit"]})
@@ -199,7 +208,7 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
             open_pos = {"entry_date": d, "exp": exp, "ks": s.strike, "kl": l.strike,
                         "cs": s.contract, "cl": l.contract, "credit": credit,
                         "iv_s": s.iv, "iv_l": l.iv, "peak": credit * 0.0,
-                        "ds": s.delta, "dl": l.delta, "vrp": v}
+                        "ds": s.delta, "dl": l.delta, "vrp": v, "cp": cfg.cp}
     return pd.DataFrame(trades)
 
 
