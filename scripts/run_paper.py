@@ -154,7 +154,7 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     if dry_run:
         out = ROOT / "results" / "paper" / f"report_{today}.html"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(body)
+        out.write_text(body, encoding="utf-8")
         logging.info("[DRY RUN] report written to %s", out)
 
 
