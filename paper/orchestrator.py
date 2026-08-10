@@ -7,8 +7,10 @@ Cadence (matches the agreed spec):
   * Rotation: each position runs a 21-trading-day clock. When it's up, KEEP the name if
     it's still within the top-`hold_n` band (~45); otherwise SELL it. Freed slots refill
     at the same ~1 new buy/day pace.
-Sizing: base $ = budget/top_n, tilted by inverse 63d volatility (clipped), then scaled by
-a portfolio vol-target factor (gentle 25% → ~fully invested except in vol spikes).
+Sizing: each entry takes its share of the REMAINING gap to the NAV-based target (not a fixed
+budget/top_n), tilted by inverse 63d volatility (clipped, and rescaled to mean exactly 1), then
+scaled by a portfolio vol-target factor (gentle 25% → ~fully invested except in vol spikes) and
+finally hard-capped at available cash. Gross therefore lands ON budget rather than up to ~2x it.
 """
 from __future__ import annotations
 
@@ -38,13 +40,65 @@ def _annual_vol(adj: pd.DataFrame, window: int) -> pd.Series:
     return r.tail(window).std() * np.sqrt(252)
 
 
-def _size_shares(ticker: str, price_local: float, fx: float, vol: pd.Series,
-                 cfg: PaperConfig, gross_scalar: float) -> int:
-    base = cfg.budget / cfg.top_n
-    ref = float(np.nanmedian(vol.values)) if len(vol) else np.nan
-    v = vol.get(ticker, np.nan)
-    tilt = np.clip(ref / v, *cfg.inv_vol_clip) if (v and v == v and ref == ref) else 1.0
-    target_usd = base * tilt * gross_scalar
+def _normalised_tilts(vol: pd.Series, cfg: PaperConfig) -> pd.Series:
+    """Inverse-vol tilts rescaled to average EXACTLY 1.
+
+    The raw tilt clip(median_vol/vol, 0.5, 2.0) does not sum to top_n: the 2.0 cap boosts
+    low-vol names while the 0.5 floor cuts high-vol ones, and which dominates depends entirely
+    on the vol cross-section of whichever names rank top that day. Simulated over 5,000 random
+    30-name books the total ran 0.92x-1.09x of budget (59% of them OVER), with a THEORETICAL
+    range of 0.5x-2.0x — and `_gross_scalar` is clipped to <=1 so it can only ever reduce, never
+    correct an overshoot. Dividing by the mean pins the sum to budget for any cross-section.
+
+    Rescaling preserves the tilt SHAPE exactly (corr with the raw tilts = 1.0000); it changes
+    the level, not the structure.
+    """
+    if not len(vol):
+        return pd.Series(dtype=float)
+    ref = float(np.nanmedian(vol.values))
+    if not ref or ref != ref:
+        return pd.Series(1.0, index=vol.index)
+    t = pd.Series(np.clip(ref / vol, *cfg.inv_vol_clip), index=vol.index).replace(
+        [np.inf, -np.inf], np.nan).fillna(1.0)
+    m = float(np.nanmean(t.values))
+    return t / m if (m and m == m and m > 0) else pd.Series(1.0, index=vol.index)
+
+
+def _slot_usd(state, marks: dict[str, float], fx: dict[str, float],
+              cfg: PaperConfig, gross_scalar: float) -> float:
+    """Dollars available for ONE new position: the remaining gap split across free slots.
+
+    Sizing every entry at budget/top_n ignores drift — positions are entered on a staggered
+    clock and never resized, so winners grow and losers shrink and the realised book wanders.
+    Sizing off the REMAINING gap self-corrects at zero extra turnover, since it only re-scales
+    an order that was being placed anyway.
+
+    The gap is measured against **NAV**, not `cfg.budget`. Against a fixed budget, a book that
+    had drawn down would try to "top up" to the original number — buying with money the account
+    no longer has. NAV (cash + positions) is the amount actually available, so the book stays
+    ~fully invested and compounds, and `cfg.budget` only sets the STARTING capital.
+    The cash constraint is NOT applied here — see `_size_shares`, which applies it after the
+    inverse-vol tilt has been multiplied in.
+    """
+    nav = state.nav(marks, fx)
+    invested = state.positions_value_usd(marks, fx)
+    slots_free = max(cfg.top_n - len(state.tickers), 1)
+    remaining = max(nav * gross_scalar - invested, 0.0)
+    return remaining / slots_free
+
+
+def _size_shares(ticker: str, price_local: float, fx: float, tilts: pd.Series,
+                 slot_usd: float, cash_usd: float) -> int:
+    """Whole shares for one entry: its share of the remaining gap, inverse-vol tilted.
+
+    The cash cap MUST be applied here, after the tilt. Capping `slot_usd` beforehand is not
+    enough: the actual spend is slot x tilt, and tilt runs to ~1.7, so a single order could
+    still overdraw. Long-only and funded, so cash is a hard constraint, not a preference.
+    """
+    tilt = float(tilts.get(ticker, 1.0))
+    if tilt != tilt or tilt <= 0:
+        tilt = 1.0
+    target_usd = min(slot_usd * tilt, max(float(cash_usd), 0.0))
     denom = price_local * fx
     return int(target_usd // denom) if denom and denom > 0 else 0
 
@@ -69,6 +123,9 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     gross = _gross_scalar(vol, cfg)
     band = set(ranking.head(cfg.hold_n).index)          # names still "good enough" to hold
     marks = {t: float(adj[t].dropna().iloc[-1]) for t in adj.columns if adj[t].notna().any()}
+    # Tilts are normalised over the names we actually INTEND to hold (the top_n ranking), not
+    # the whole universe — otherwise the mean is set by names we will never buy.
+    tilts = _normalised_tilts(vol.reindex(ranking.head(cfg.top_n).index).dropna(), cfg)
 
     sells, holds, buys = [], [], []
 
@@ -97,7 +154,9 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 continue
             price_local = marks[t]
             f = fx.get(ccy.get(t, "USD"), 1.0)
-            shares = _size_shares(t, price_local, f, vol, cfg, gross)
+            # Recomputed per buy so the gap reflects fills already made this session.
+            slot = _slot_usd(state, marks, fx, cfg, gross)
+            shares = _size_shares(t, price_local, f, tilts, slot, state.cash)
             if shares <= 0:
                 continue
             res = broker.order(t, "BUY", shares)
