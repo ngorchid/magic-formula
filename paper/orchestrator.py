@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from paper.state import HOLD_DAYS, PortfolioState, Position
+from risk_guard import RiskLimits, check_order, price_sane
 
 
 @dataclass
@@ -33,6 +34,11 @@ class PaperConfig:
     vol_window: int = 63       # days for per-name realised vol
     inv_vol_clip: tuple[float, float] = (0.5, 2.0)
     hold_days: int = HOLD_DAYS
+    # Independent pre-trade guard. It re-derives every order from the budget rather than trusting
+    # the sizing above, because a guard that reuses the strategy's arithmetic cannot catch the
+    # strategy's own bug — and this file had exactly such a bug (gross reaching ~2x budget) two
+    # days before it was wired in. Rejections are LOGGED and skipped, never silent.
+    use_risk_guard: bool = True
 
 
 def _annual_vol(adj: pd.DataFrame, window: int) -> pd.Series:
@@ -159,6 +165,20 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
             shares = _size_shares(t, price_local, f, tilts, slot, state.cash)
             if shares <= 0:
                 continue
+            if cfg.use_risk_guard:
+                lim = RiskLimits.for_equities(state.nav(marks, fx) or cfg.budget)
+                ok_px = price_sane(t, price_local, None, lim)
+                if not ok_px:
+                    logging.warning("RISK REJECT %s", ok_px.reason)
+                    continue
+                pos = state.get(t)
+                cur = (pos.shares * price_local * f) if pos else 0.0
+                chk = check_order(t, "BUY", shares, price_local, 1.0 * f, lim,
+                                  current_position_notional=cur,
+                                  gross_notional=state.positions_value_usd(marks, fx))
+                if not chk:
+                    logging.warning("RISK REJECT %s", chk.reason)
+                    continue
             res = broker.order(t, "BUY", shares)
             if res["ok"]:
                 entry = res["fill_price"] or price_local     # actual fill (RTH) or mark (queued/dry)
