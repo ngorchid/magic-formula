@@ -30,7 +30,8 @@ from paper.broker import Broker  # noqa: E402
 from paper.email_report import send_report  # noqa: E402
 from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
-from risk_guard import install_alert_collector, missed_runs  # noqa: E402
+from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
+                        push_if_alerts)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -162,6 +163,10 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         logging.warning("heartbeat: %s", _note)
     body = send_report(state, marks, fx, spy_day, spy_incep, today, dry_run=dry_run,
                        alerts=ALERTS)
+    # Out-of-band push, AFTER the email attempt so an SMTP failure is itself in what gets pushed.
+    # The email cannot report its own failure; this is the only channel that can.
+    if not dry_run:
+        push_if_alerts(ALERTS, "Magic Formula")
     if dry_run:
         out = ROOT / "results" / "paper" / f"report_{today}.html"
         out.parent.mkdir(parents=True, exist_ok=True)
