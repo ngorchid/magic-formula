@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from paper.state import HOLD_DAYS, PortfolioState, Position
-from risk_guard import RiskLimits, check_order, price_sane
+from risk_guard import MarginLimits, RiskLimits, check_order, margin_check, price_sane
 
 
 @dataclass
@@ -148,10 +148,26 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 state.close_position(pos.ticker, px, f, today, reason="clock: dropped from band")
                 sells.append(pos.ticker)
 
+    # ---- margin ceiling (shared account) -------------------------------------------------
+    # Checked BEFORE the buy loop and never around the sells: this may only block NEW risk.
+    # Several strategies share one IB account because the trend overlay is a margin overlay on
+    # common collateral, so the margin constraint is genuinely account-wide and one strategy can
+    # legitimately be blocked by another's usage. Being blocked beats being liquidated.
+    margin_scale = 1.0
+    if cfg.use_risk_guard and hasattr(broker, "margin_usage"):
+        mu = broker.margin_usage()
+        lvl, margin_scale, why = margin_check(*(mu if mu else (float("nan"), 0.0)),
+                                              limits=MarginLimits())
+        if why:
+            (logging.warning if lvl in ("derisk", "halt", "unknown") else logging.info)(
+                "margin: %s", why)
+
     # ---- buys: fill toward top_n at ≤ max_new_buys_per_day, highest-ranked not held ----
     held = state.tickers
     room = cfg.top_n - len(held)
     n_buys = min(cfg.max_new_buys_per_day, max(room, 0))
+    if margin_scale <= 0:
+        n_buys = 0          # margin ceiling: hold what we have, open nothing new
     if n_buys > 0:
         for t in ranking.index:
             if n_buys <= 0:

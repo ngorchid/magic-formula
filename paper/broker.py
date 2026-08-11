@@ -101,6 +101,27 @@ class Broker:
             logging.warning("price failed for %s: %s", ticker, e)
             return None
 
+    def margin_usage(self) -> tuple[float, float] | None:
+        """(maintenance margin used, net liquidation) for the WHOLE account, or None.
+
+        Account-wide on purpose: several strategies share this account, so the margin constraint
+        genuinely is shared. `MaintMarginReq` rather than `FullInitMarginReq` because maintenance
+        is what an actual liquidation is measured against.
+
+        Returns None on any failure — the caller treats that as "unknown" and logs it, rather
+        than assuming healthy.
+        """
+        try:
+            rows = {r.tag: r for r in self.ib.accountSummary()}
+            mm = rows.get("MaintMarginReq") or rows.get("FullMaintMarginReq")
+            nl = rows.get("NetLiquidation")
+            if not mm or not nl:
+                return None
+            return float(mm.value), float(nl.value)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("margin_usage failed: %s", e)
+            return None
+
     def net_liq(self) -> tuple[float, str] | None:
         """(value, currency) of NetLiquidation — informational only (account base ccy;
         commingled if the account is shared with other strategies). Not used for sizing."""
