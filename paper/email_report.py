@@ -79,11 +79,21 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
 
 
 def send_report(state: PortfolioState, marks: dict, fx: dict,
-                spy_day_ret, spy_incep_ret, today: str, dry_run: bool = False) -> str:
+                spy_day_ret, spy_incep_ret, today: str, dry_run: bool = False,
+                alerts=None) -> str:
+    """`alerts` is an AlertCollector. Its records go at the TOP of the body and, crucially, a
+    marker goes in the SUBJECT — the whole point is that a guard firing is visible without
+    opening anything. Warnings previously went only to results/paper/run.log, which nobody
+    reads daily, so an alert that fired was indistinguishable from one that never did."""
     body = build_email_body(state, marks, fx, spy_day_ret, spy_incep_ret, today)
+    if alerts is not None and getattr(alerts, "records", None):
+        body = alerts.html() + body
     nav = state.nav(marks, fx)
     total_ret = nav / state.inception_nav - 1 if state.inception_nav else 0
-    subject = f"Magic Formula Paper — {today}: NAV ${nav:,.0f} ({total_ret*100:+.1f}%)"
+    mark = ""
+    if alerts is not None and getattr(alerts, "worst", None):
+        mark = f"[{alerts.worst} x{len(alerts.records)}] "
+    subject = f"{mark}Magic Formula Paper — {today}: NAV ${nav:,.0f} ({total_ret*100:+.1f}%)"
 
     user, pw, to = os.getenv("EMAIL_USER"), os.getenv("EMAIL_PASS"), os.getenv("TO_EMAIL")
     if dry_run or not all([user, pw, to]):
