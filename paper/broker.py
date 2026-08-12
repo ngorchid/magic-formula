@@ -101,6 +101,29 @@ class Broker:
             logging.warning("price failed for %s: %s", ticker, e)
             return None
 
+    def stock_positions(self) -> dict[str, float] | None:
+        """{ticker -> signed shares} for STOCKS at IB, or None if unavailable.
+
+        Filtered to secType STK on purpose: this account is shared with the options and futures
+        strategies, and an unfiltered read would report their positions as orphans — which is
+        exactly the pattern that once had one strategy flattening another's book.
+
+        Returns None (not {}) when it cannot be read, so the caller can distinguish "flat" from
+        "could not check"; an empty dict would make every held position look like a phantom.
+        """
+        if getattr(self, "dry_run", False) or self.ib is None:
+            return None
+        try:
+            out: dict[str, float] = {}
+            for it in self.ib.portfolio():
+                c = it.contract
+                if c.secType == "STK" and it.position:
+                    out[c.symbol] = out.get(c.symbol, 0.0) + float(it.position)
+            return out
+        except Exception as e:  # noqa: BLE001
+            logging.warning("stock_positions failed: %s", e)
+            return None
+
     def margin_usage(self) -> tuple[float, float] | None:
         """(maintenance margin used, net liquidation) for the WHOLE account, or None.
 

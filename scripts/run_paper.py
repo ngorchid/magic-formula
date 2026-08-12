@@ -31,7 +31,7 @@ from paper.email_report import send_report  # noqa: E402
 from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
-                        push_if_alerts)
+                        push_if_alerts, reconcile)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -144,6 +144,18 @@ def main(dry_run: bool = False, force: bool = False) -> None:
             return
     try:
         summary = run_daily(state, ranking, panels, fx, broker, cfg, today)
+        # RECONCILE while the IB connection is still OPEN — this must sit inside the try, before
+        # disconnect(). State is what the strategy BELIEVES; when it is wrong, nothing inside the
+        # strategy can tell. Report only, never auto-correct a shared account.
+        if not dry_run:
+            _actual = broker.stock_positions()
+            if _actual is None:
+                logging.warning("reconcile: IB positions unavailable — state NOT verified")
+            else:
+                _exp = {p.ticker: float(p.shares) for p in state.positions}
+                _d, _rnote = reconcile(_exp, _actual, label="equities")
+                if _rnote:
+                    logging.warning("%s", _rnote)
     finally:
         broker.disconnect()
 
