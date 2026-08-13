@@ -37,7 +37,37 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 warnings.filterwarnings("ignore")
 
-from backtest import summary_stats  # noqa: E402
+from backtest import summary_stats as _summary_stats  # noqa: E402
+
+
+def summary_stats(ret: pd.Series) -> dict:
+    """summary_stats, but annualised from the CALENDAR SPAN rather than the observation count.
+
+    ⚠ backtest.summary_stats hard-codes TRADING_DAYS=252, which is right only for a genuinely
+    daily series. The options-vrp mark-to-market series has ~64 observations per calendar year —
+    the sleeve holds a position roughly a quarter of the time — and annualising it as daily
+    overstated **vol and Sharpe by 2.0x and the annual return by 4.0x** (the return error is
+    larger because the exponent is 252/n, with n the observation COUNT).
+
+    The symptom that exposed it: its worst drawdown came out at 0.91 sigma against 1.90 for
+    trend and 1.19 for magic formula. A book being that much safer in its own risk units had no
+    mechanism behind it. maxDD itself is path-based and unaffected.
+    """
+    out = dict(_summary_stats(ret))
+    if len(ret) < 2 or not isinstance(ret.index, pd.DatetimeIndex):
+        return out
+    yrs = (ret.index[-1] - ret.index[0]).days / 365.25
+    if yrs <= 0:
+        return out
+    opy = len(ret) / yrs
+    if opy > 230:                      # genuinely daily: leave as-is
+        return out
+    sd = ret.std()
+    out["ann_return"] = float((1.0 + ret.fillna(0.0)).prod() ** (1.0 / yrs) - 1.0)
+    out["ann_vol"] = float(sd * np.sqrt(opy))
+    out["sharpe"] = float(ret.mean() / sd * np.sqrt(opy)) if sd else float("nan")
+    out["obs_per_year"] = float(opy)
+    return out
 
 LEVELS = {"derisk": (0.15, 0.5), "reduce_only": (0.25, 0.0), "halt": (0.35, 0.0)}
 BOOK_LEVELS = {"derisk": (0.10, 0.5), "reduce_only": (0.18, 0.0), "halt": (0.25, 0.0)}
@@ -86,10 +116,15 @@ def capitulation(ret: pd.Series, levels: dict) -> pd.DataFrame:
         over = dd >= thr
         first = over & ~over.shift(1, fill_value=False)
         idx = ret.index[first]
-        f21 = [float((1 + ret.loc[d:]).cumprod().iloc[:21].iloc[-1] - 1)
-               for d in idx if len(ret.loc[d:]) >= 5]
-        f63 = [float((1 + ret.loc[d:]).cumprod().iloc[:63].iloc[-1] - 1)
-               for d in idx if len(ret.loc[d:]) >= 5]
+        # CALENDAR windows, not observation counts. On a sparse series 21/63 observations is
+        # 120/360 days, so "forward 3 months" silently became "forward a year" — and a
+        # profitable strategy is positive over a year almost wherever you enter, which made a
+        # mixed result look like clear capitulation.
+        def _fwd(d, days):
+            w = ret.loc[d:d + pd.Timedelta(days=days)]
+            return float((1 + w).cumprod().iloc[-1] - 1) if len(w) >= 3 else None
+        f21 = [x for d in idx if (x := _fwd(d, 30)) is not None]
+        f63 = [x for d in idx if (x := _fwd(d, 91)) is not None]
         rows.append({"level": name, "thr": thr, "triggers": len(idx),
                      "fwd21_mean": np.mean(f21) if f21 else np.nan,
                      "fwd21_pos": np.mean([x > 0 for x in f21]) if f21 else np.nan,
