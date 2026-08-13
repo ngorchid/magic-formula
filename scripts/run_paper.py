@@ -33,7 +33,8 @@ from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
-                        data_fresh, RiskLimits, write_equity, book_drawdown, BookLevels)
+                        data_fresh, RiskLimits, write_equity, book_drawdown, BookLevels,
+                        BreakerLevels, realised_vol)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -163,7 +164,13 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     _peak = peak_equity(state.nav_history, cfg.budget, key="nav", absolute=True)
     _peak = max(_peak, _eq)
     write_equity(ROOT.parent, "magic-formula", _eq, _peak)
-    _blvl, _bscale, _bwhy = circuit_breaker(_eq, _peak)
+    # Levels scaled to THIS book's own volatility. A fixed 15/25/35 is 1.2/2.0/2.8 sigma at
+    # trend's 12.4% vol but only 0.7/1.2/1.6 sigma on a ~21% equity book — routine moves, not
+    # failures. Backtested: the fixed levels cost 0.34 Sharpe here and fired at the bottom on
+    # 13 of 13 triggers.
+    _lv = BreakerLevels.from_vol(realised_vol(state.nav_history, cfg.budget, key="nav",
+                                              absolute=True))
+    _blvl, _bscale, _bwhy = circuit_breaker(_eq, _peak, _lv)
     if _bwhy:
         (logging.error if _blvl == "halt" else logging.warning)("circuit breaker: %s", _bwhy)
     # BOOK-level: three books each down 20% all sit under their own 25% threshold while the
