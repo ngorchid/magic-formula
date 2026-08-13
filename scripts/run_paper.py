@@ -157,6 +157,16 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         logging.warning("HALTED (new risk): %s — managing existing positions only", _hwhy)
         cfg.max_new_buys_per_day = 0
 
+    ranking, panels = _refresh_ranking(today, cfg_mf)
+    # Daily light refresh: current prices for held names + top candidates (marks/sizing/P&L).
+    refresh_set = state.tickers | set(list(ranking.index)[:100])
+    panels = _refresh_marks(panels, refresh_set)
+    fx = _fx_to_usd(set(panels["currency"].values()))
+
+    # CIRCUIT BREAKER / STALENESS run AFTER the refresh above: both read `panels` (prices) and the
+    # breaker reads `fx`, which _refresh_ranking / _refresh_marks / _fx_to_usd create. (The kill
+    # switch stays first, before the ~13-min pull, because it needs neither. They cannot run
+    # earlier — staleness is precisely a property of the freshly refreshed price panel.)
     # CIRCUIT BREAKER — drawdown from the book's own peak NAV. Thresholds sit OUTSIDE the range
     # the strategy is expected to produce (15/25/35%), because this is an operational failsafe for
     # "something is wrong", not a risk tool for normal losses; sizing handles those. It NEVER
@@ -199,12 +209,6 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         cfg.max_new_buys_per_day = 0
     elif _bscale < 1.0:                   # derisk: smaller new positions
         cfg.vol_target *= _bscale
-
-    ranking, panels = _refresh_ranking(today, cfg_mf)
-    # Daily light refresh: current prices for held names + top candidates (marks/sizing/P&L).
-    refresh_set = state.tickers | set(list(ranking.index)[:100])
-    panels = _refresh_marks(panels, refresh_set)
-    fx = _fx_to_usd(set(panels["currency"].values()))
 
     broker = Broker(host=os.getenv("IB_HOST", "127.0.0.1"),
                     port=int(os.getenv("IB_PORT", "7497")),
