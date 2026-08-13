@@ -154,7 +154,11 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     # common collateral, so the margin constraint is genuinely account-wide and one strategy can
     # legitimately be blocked by another's usage. Being blocked beats being liquidated.
     margin_scale = 1.0
-    if cfg.use_risk_guard and hasattr(broker, "margin_usage"):
+    # Skipped entirely in dry-run: there is no connection by design, so "margin unavailable" is
+    # expected rather than anomalous. Warning about it offline would fire on every dry run and
+    # train you to ignore the one that matters — when it appears in a LIVE run.
+    if (cfg.use_risk_guard and hasattr(broker, "margin_usage")
+            and not getattr(broker, "dry_run", False)):
         mu = broker.margin_usage()
         lvl, margin_scale, why = margin_check(*(mu if mu else (float("nan"), 0.0)),
                                               limits=MarginLimits())

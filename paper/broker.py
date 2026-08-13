@@ -133,7 +133,15 @@ class Broker:
 
         Returns None on any failure — the caller treats that as "unknown" and logs it, rather
         than assuming healthy.
+
+        The dry-run / not-connected guard is NOT optional: without it this raises on every dry
+        run, the exception is caught, and a WARNING is logged — which the alert collector then
+        puts in the email subject and pushes to your phone. An alert channel that cries wolf on
+        every offline run is worse than none, because you learn to ignore it. The other two
+        brokers' copies already had this; magic-formula's was written first and missed it.
         """
+        if self.dry_run or self.ib is None:
+            return None
         try:
             rows = {r.tag: r for r in self.ib.accountSummary()}
             mm = rows.get("MaintMarginReq") or rows.get("FullMaintMarginReq")
