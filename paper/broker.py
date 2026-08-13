@@ -171,7 +171,7 @@ class Broker:
     # order-status buckets: live = filled or will fill; dead = will not fill
     _DEAD = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 
-    def order(self, ticker: str, action: str, shares: int, wait: float = 4.0) -> dict:
+    def order(self, ticker: str, action: str, shares: int, wait: float = 20.0) -> dict:
         """Place a market order (BUY/SELL). Returns
             {ok, status, fill_price}
         ok=True if the order is live (filled or queued to fill); False if rejected/cancelled.
@@ -191,7 +191,15 @@ class Broker:
             order = MarketOrder(action, shares)
             order.tif = "DAY"                      # explicit — avoids the preset TIF cancel/resubmit
             trade = self.ib.placeOrder(c, order)
-            self.ib.sleep(wait)                    # let it fill (RTH) or reach PreSubmitted (queued)
+            # Poll up to `wait`s, returning as soon as the order reaches a terminal state. A single
+            # fixed sleep read the status while still PreSubmitted, so the email showed unfilled
+            # orders that had actually filled a second later. Liquid names return in ~1s.
+            waited = 0.0
+            while waited < wait:
+                self.ib.sleep(1.0)
+                waited += 1.0
+                if trade.orderStatus.status == "Filled" or trade.orderStatus.status in self._DEAD:
+                    break
             st = trade.orderStatus.status
             if st in self._DEAD:
                 logging.warning("%s %d %s NOT live (status=%s) — not recorded", action, shares, ticker, st)
