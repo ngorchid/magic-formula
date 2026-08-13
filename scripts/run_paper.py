@@ -48,12 +48,19 @@ load_dotenv(ROOT / ".env")
 
 STATE_FILE = ROOT / "results" / "paper" / "state.json"
 
-# Annualised vol prior for the circuit-breaker levels, from the ENHANCED backtest
-# (scripts/enhanced_magic_backtest.py, live config, $500m floor, 2020-08..2025-08): 21.6%.
-# Used until the live curve has enough history, then shrunk away smoothly.
+# Annualised vol prior for the circuit-breaker levels: 19.0%, from the AUTHORITATIVE backtest —
+# scripts/run_best_magic.py on the PIT survivorship-corrected S&P 500 with EDGAR deep-history
+# fundamentals, 2012-01..2026-07 (14.6 yrs): ann +17.7%, vol 19.0%, Sharpe 0.96, maxDD -35.8%.
+# Series: results/best_magic/best_sp500_pit_all.csv.
+#
+# ⚠ CORRECTED 2026-08-13 from 21.6%. That figure came from scripts/enhanced_magic_backtest.py,
+# which I wrote after wrongly concluding no enhanced backtest existed — it does, and had since
+# July. The substitute ran on the free SimFin BROAD universe over 4.9 years (Sharpe 0.49, vol
+# 21.6%), a different and much weaker dataset. Prefer the PIT series for anything that matters.
+#
 # ⚠ UPDATE THIS if the configuration materially changes the book's risk (top_n, weighting,
 # universe floor) — the recorded history will not reflect it for months.
-VOL_PRIOR = 0.216
+VOL_PRIOR = 0.190
 RANK_CACHE = ROOT / "results" / "paper" / "ranking.json"
 PANEL_CACHE = ROOT / "results" / "paper" / "panels.pkl"
 
