@@ -32,7 +32,7 @@ from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
                         push_if_alerts, reconcile, halt_state,
-                        HALT_ALL, HALT_NEW)
+                        HALT_ALL, HALT_NEW, circuit_breaker, peak_equity)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -140,6 +140,23 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     if _halt == HALT_NEW:
         logging.warning("HALTED (new risk): %s — managing existing positions only", _hwhy)
         cfg.max_new_buys_per_day = 0
+
+    # CIRCUIT BREAKER — drawdown from the book's own peak NAV. Thresholds sit OUTSIDE the range
+    # the strategy is expected to produce (15/25/35%), because this is an operational failsafe for
+    # "something is wrong", not a risk tool for normal losses; sizing handles those. It NEVER
+    # auto-flattens: liquidating at a drawdown threshold is capitulating at the bottom, the same
+    # mistake as the 2x stop removed from options-vrp. It stops NEW risk and shouts.
+    _adj = panels["adj"]
+    _marks = {t: float(_adj[t].dropna().iloc[-1]) for t in _adj.columns if _adj[t].notna().any()}
+    _eq = state.nav(_marks, fx)
+    _peak = peak_equity(state.nav_history, cfg.budget, key="nav", absolute=True)
+    _blvl, _bscale, _bwhy = circuit_breaker(_eq, _peak)
+    if _bwhy:
+        (logging.error if _blvl == "halt" else logging.warning)("circuit breaker: %s", _bwhy)
+    if _bscale <= 0:                      # reduce_only / halt: no NEW risk, closes still run
+        cfg.max_new_buys_per_day = 0
+    elif _bscale < 1.0:                   # derisk: smaller new positions
+        cfg.vol_target *= _bscale
 
     ranking, panels = _refresh_ranking(today, cfg_mf)
     # Daily light refresh: current prices for held names + top candidates (marks/sizing/P&L).
