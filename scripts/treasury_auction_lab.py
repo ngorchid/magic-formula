@@ -290,7 +290,21 @@ def leg_pnl(panel: pd.DataFrame, legs: Legs) -> pd.DataFrame:
 
 def stat_block(df: pd.DataFrame, label: str, cost_rt: float) -> dict:
     """Gross/net mean bp + clustered t for each leg. Costs: 1 round trip per single leg,
-    2 for the combined (entry 0.5 + flip 1.0 + exit 0.5)."""
+    2 for the combined (entry 0.5 + flip 1.0 + exit 0.5).
+
+    Two t-statistics are stored and they are NOT interchangeable:
+      `{leg}_t`         cluster-robust (weekly clusters) — THE ONE TO QUOTE. Overlapping holding
+                        windows make observations dependent, and ignoring that overstates
+                        significance.
+      `{leg}_t_naive`   the same quantity assuming independence. Kept only to show what the
+                        clustering costs; always the more optimistic of the two.
+
+    ⚠ NEITHER IS A SHARPE RATIO. mean/std*sqrt(n) is a t-statistic over the whole sample; an
+    annualised Sharpe divides by the sample's YEARS rather than multiplying by its observation
+    count. They differ by about sqrt(events per year) here, so reading one as the other
+    overstates the strategy several-fold — t=+7.48 on the 5y fly against a Sharpe of ~1.65. The
+    naive field used to be named for an information ratio, which invited exactly that misreading.
+    """
     weeks = df["auctionDate"].dt.to_period("W")
     row = {"cut": label, "n": len(df)}
     for leg, rts in (("concession", 1), ("snapback", 1), ("combined", 2)):
@@ -298,7 +312,8 @@ def stat_block(df: pd.DataFrame, label: str, cost_rt: float) -> dict:
         row[f"{leg}_gross"] = mean
         row[f"{leg}_net"] = mean - cost_rt * rts
         row[f"{leg}_t"] = t
-        row[f"{leg}_ir"] = mean / df[leg].std() * np.sqrt(len(df)) if df[leg].std() > 0 else np.nan
+        sd = df[leg].std()
+        row[f"{leg}_t_naive"] = mean / sd * np.sqrt(len(df)) if sd > 0 else np.nan
     return row
 
 
