@@ -34,7 +34,7 @@ from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
                         data_fresh, RiskLimits, write_equity, book_drawdown, BookLevels,
-                        BreakerLevels, realised_vol)
+                        BreakerLevels, blended_vol)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -47,6 +47,13 @@ ALERTS = install_alert_collector()
 load_dotenv(ROOT / ".env")
 
 STATE_FILE = ROOT / "results" / "paper" / "state.json"
+
+# Annualised vol prior for the circuit-breaker levels, from the ENHANCED backtest
+# (scripts/enhanced_magic_backtest.py, live config, $500m floor, 2020-08..2025-08): 21.6%.
+# Used until the live curve has enough history, then shrunk away smoothly.
+# ⚠ UPDATE THIS if the configuration materially changes the book's risk (top_n, weighting,
+# universe floor) — the recorded history will not reflect it for months.
+VOL_PRIOR = 0.216
 RANK_CACHE = ROOT / "results" / "paper" / "ranking.json"
 PANEL_CACHE = ROOT / "results" / "paper" / "panels.pkl"
 
@@ -168,8 +175,8 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # trend's 12.4% vol but only 0.7/1.2/1.6 sigma on a ~21% equity book — routine moves, not
     # failures. Backtested: the fixed levels cost 0.34 Sharpe here and fired at the bottom on
     # 13 of 13 triggers.
-    _lv = BreakerLevels.from_vol(realised_vol(state.nav_history, cfg.budget, key="nav",
-                                              absolute=True))
+    _lv = BreakerLevels.from_vol(blended_vol(state.nav_history, cfg.budget, VOL_PRIOR,
+                                             key="nav", absolute=True))
     _blvl, _bscale, _bwhy = circuit_breaker(_eq, _peak, _lv)
     if _bwhy:
         (logging.error if _blvl == "halt" else logging.warning)("circuit breaker: %s", _bwhy)
