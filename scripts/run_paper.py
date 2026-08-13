@@ -31,7 +31,8 @@ from paper.email_report import send_report  # noqa: E402
 from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
-                        push_if_alerts, reconcile)
+                        push_if_alerts, reconcile, halt_state,
+                        HALT_ALL, HALT_NEW)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -127,6 +128,18 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     cfg_mf = EnhancedMagicConfig(use_graham=False)
     cfg = PaperConfig()
     state = PortfolioState.load(STATE_FILE)
+
+    # KILL SWITCH — FIRST, before the universe refresh. That pull takes ~13 minutes, so checking
+    # afterwards would make a halted run do all the expensive work anyway, and would delay a
+    # HALT_ALL exit by a quarter of an hour when the point is to stop promptly.
+    _halt, _hwhy = halt_state(ROOT)
+    if _halt == HALT_ALL:
+        logging.error("HALTED (all): %s — exiting without trading", _hwhy)
+        push_if_alerts(ALERTS, "Magic Formula")
+        return
+    if _halt == HALT_NEW:
+        logging.warning("HALTED (new risk): %s — managing existing positions only", _hwhy)
+        cfg.max_new_buys_per_day = 0
 
     ranking, panels = _refresh_ranking(today, cfg_mf)
     # Daily light refresh: current prices for held names + top candidates (marks/sizing/P&L).
