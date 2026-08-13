@@ -139,7 +139,11 @@ def mark(chain_by_date: dict, date, contract, strike, expiry, cp, spot, r, last_
 
 
 def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
-        ratio: pd.Series | None = None) -> pd.DataFrame:
+        ratio: pd.Series | None = None, daily_out: list | None = None) -> pd.DataFrame:
+    """`daily_out`, if given, receives {date, unrealized} each day a position is open, in
+    DOLLARS. Needed to build an honest equity curve: attributing a trade's P&L to its exit date
+    hides every intra-trade drawdown, which for a 30-45 day short-put hold is most of the
+    drawdown there is. Default None leaves behaviour unchanged."""
     if cfg.regime_thr is not None and ratio is None:
         ratio = regime_ratio()
     dates = np.array(sorted(ch.date.unique()))
@@ -162,6 +166,9 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
             if ps is not None and pl is not None:
                 val = ps - pl
                 open_pos["peak"] = max(open_pos["peak"], val)
+                if daily_out is not None:
+                    daily_out.append({"date": d,
+                                      "unrealized": (open_pos["credit"] - val) * 100})
                 reason = None
                 if val <= cfg.profit_target * open_pos["credit"]:
                     reason = "profit"
