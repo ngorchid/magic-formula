@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
-from paper.broker import Broker  # noqa: E402
+from paper.broker import Broker, ib_contract_spec  # noqa: E402
 from paper.email_report import send_report  # noqa: E402
 from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
@@ -152,7 +152,15 @@ def main(dry_run: bool = False, force: bool = False) -> None:
             if _actual is None:
                 logging.warning("reconcile: IB positions unavailable — state NOT verified")
             else:
-                _exp = {p.ticker: float(p.shares) for p in state.positions}
+                # Key by the IB SYMBOL, not the yfinance ticker: state stores foreign names with
+                # an exchange suffix (ASML.AS, AVIO.MI, SCYR.MC) while IB reports the bare symbol
+                # (ASML, AVIO, SCYR). Comparing raw made every European holding show up as BOTH a
+                # phantom (state's suffixed key) and an orphan (IB's bare key) — 12 false alarms
+                # that drowned the one real orphan. ib_contract_spec is the same mapping the order
+                # path uses, so the keys now line up.
+                _exp: dict[str, float] = {}
+                for p in state.positions:
+                    _exp[ib_contract_spec(p.ticker)[0]] = _exp.get(ib_contract_spec(p.ticker)[0], 0.0) + float(p.shares)
                 _d, _rnote = reconcile(_exp, _actual, label="equities")
                 if _rnote:
                     logging.warning("%s", _rnote)
