@@ -32,7 +32,8 @@ from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
                         push_if_alerts, reconcile, halt_state,
-                        HALT_ALL, HALT_NEW, circuit_breaker, peak_equity)
+                        HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
+                        data_fresh, RiskLimits)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -146,6 +147,16 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # "something is wrong", not a risk tool for normal losses; sizing handles those. It NEVER
     # auto-flattens: liquidating at a drawdown threshold is capitulating at the bottom, the same
     # mistake as the 2x stop removed from options-vrp. It stops NEW risk and shouts.
+    # STALENESS. A frozen feed keeps returning plausible prices, so every downstream number —
+    # marks, sizing, NAV, the rankings — still computes and still looks reasonable. price_sane
+    # cannot catch it: each individual price is perfectly valid, just old. Fails CLOSED, because
+    # trading on a stale picture of the market is worse than missing a day.
+    _fresh = data_fresh(panels["adj"].index, pd.Timestamp(today), RiskLimits(budget=cfg.budget))
+    if not _fresh:
+        logging.error("data staleness: %s — NOT trading today", _fresh.reason)
+        push_if_alerts(ALERTS, "Magic Formula")
+        return
+
     _adj = panels["adj"]
     _marks = {t: float(_adj[t].dropna().iloc[-1]) for t in _adj.columns if _adj[t].notna().any()}
     _eq = state.nav(_marks, fx)
