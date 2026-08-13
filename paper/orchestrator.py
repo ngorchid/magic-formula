@@ -90,7 +90,15 @@ def _slot_usd(state, marks: dict[str, float], fx: dict[str, float],
     invested = state.positions_value_usd(marks, fx)
     slots_free = max(cfg.top_n - len(state.tickers), 1)
     remaining = max(nav * gross_scalar - invested, 0.0)
-    return remaining / slots_free
+    slot = remaining / slots_free
+    # Cap a single entry at ~2x equal-weight. Without this, a FULL book (held == top_n) collapses
+    # slots_free to max(0, 1) = 1, so the entire accumulated-cash gap is aimed at ONE order — which
+    # sized every rotation buy at the whole cash balance (~16% of budget), breaching the 15%
+    # single-order cap and rejecting the entire ranked list (362 alerts on 2026-08-13). The gap
+    # instead deploys ~equal-weight per day; excess cash trickles in over subsequent days, which is
+    # fine for a slow monthly book. 2x gives drift room without approaching the cap.
+    equal_weight = nav * gross_scalar / max(cfg.top_n, 1)
+    return min(slot, 2.0 * equal_weight)
 
 
 def _size_shares(ticker: str, price_local: float, fx: float, tilts: pd.Series,
@@ -172,6 +180,7 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     n_buys = min(cfg.max_new_buys_per_day, max(room, 0))
     if margin_scale <= 0:
         n_buys = 0          # margin ceiling: hold what we have, open nothing new
+    rejects: list[str] = []          # collected, then summarised in ONE alert (see below)
     if n_buys > 0:
         for t in ranking.index:
             if n_buys <= 0:
@@ -189,7 +198,8 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 lim = RiskLimits.for_equities(state.nav(marks, fx) or cfg.budget)
                 ok_px = price_sane(t, price_local, None, lim)
                 if not ok_px:
-                    logging.warning("RISK REJECT %s", ok_px.reason)
+                    logging.info("risk reject %s", ok_px.reason)
+                    rejects.append(ok_px.reason)
                     continue
                 pos = state.get(t)
                 cur = (pos.shares * price_local * f) if pos else 0.0
@@ -197,7 +207,8 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                                   current_position_notional=cur,
                                   gross_notional=state.positions_value_usd(marks, fx))
                 if not chk:
-                    logging.warning("RISK REJECT %s", chk.reason)
+                    logging.info("risk reject %s", chk.reason)
+                    rejects.append(chk.reason)
                     continue
             res = broker.order(t, "BUY", shares)
             if res["ok"]:
@@ -208,6 +219,13 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 buys.append((t, shares, round(shares * entry * f, 0)))
                 held.add(t)
                 n_buys -= 1
+
+    # ONE alert for the whole run, not one per candidate: a systematic reject (e.g. a sizing/cap
+    # mismatch) scans the entire ranked list, and 361 identical WARNINGs once buried every other
+    # alert in the email (2026-08-13). The per-candidate detail stays at INFO in the log.
+    if rejects:
+        logging.warning("risk guard rejected %d buy candidate(s) this run (e.g. %s)",
+                        len(rejects), rejects[0])
 
     logging.info("Daily %s: %d bought, %d sold, %d held-through (gross %.2f)",
                  today, len(buys), len(sells), len(holds), gross)
