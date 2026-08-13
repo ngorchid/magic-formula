@@ -33,7 +33,7 @@ from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
-                        data_fresh, RiskLimits)
+                        data_fresh, RiskLimits, write_equity, book_drawdown, BookLevels)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
 from paper.universe import paper_universe  # noqa: E402
@@ -161,9 +161,19 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     _marks = {t: float(_adj[t].dropna().iloc[-1]) for t in _adj.columns if _adj[t].notna().any()}
     _eq = state.nav(_marks, fx)
     _peak = peak_equity(state.nav_history, cfg.budget, key="nav", absolute=True)
+    _peak = max(_peak, _eq)
+    write_equity(ROOT.parent, "magic-formula", _eq, _peak)
     _blvl, _bscale, _bwhy = circuit_breaker(_eq, _peak)
     if _bwhy:
         (logging.error if _blvl == "halt" else logging.warning)("circuit breaker: %s", _bwhy)
+    # BOOK-level: three books each down 20% all sit under their own 25% threshold while the
+    # total is down 20% — the correlated crash no single strategy can see. Worse of the two.
+    _bdd, _beq, _bpk, _bnote = book_drawdown(ROOT.parent)
+    if _bdd is not None:
+        _lvl2, _sc2, _why2 = circuit_breaker(_beq, _bpk, BookLevels())
+        if _why2:
+            logging.warning("BOOK circuit breaker: %s | %s", _why2, _bnote)
+        _bscale = min(_bscale, _sc2)
     if _bscale <= 0:                      # reduce_only / halt: no NEW risk, closes still run
         cfg.max_new_buys_per_day = 0
     elif _bscale < 1.0:                   # derisk: smaller new positions
