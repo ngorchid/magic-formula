@@ -33,7 +33,7 @@ from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
-                        data_fresh, RiskLimits, write_equity, book_drawdown, BookLevels,
+                        data_fresh, RiskLimits, write_equity, book_drawdown, book_vol,
                         BreakerLevels, blended_vol)
 from paper.rank import todays_ranking  # noqa: E402
 from paper.state import PortfolioState  # noqa: E402
@@ -201,7 +201,13 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # total is down 20% — the correlated crash no single strategy can see. Worse of the two.
     _bdd, _beq, _bpk, _bnote = book_drawdown(ROOT.parent)
     if _bdd is not None:
-        _lvl2, _sc2, _why2 = circuit_breaker(_beq, _bpk, BookLevels())
+        # Book levels scale to the BOOK's OWN vol, not a hard-coded tighter set. With one
+        # strategy live the book curve IS that strategy's, so the levels come out identical
+        # and this adds nothing — correct, since there is no diversification to reward.
+        # Skipped entirely until the book has enough history to estimate its vol.
+        _bvol = book_vol(ROOT.parent)
+        _lvl2, _sc2, _why2 = (circuit_breaker(_beq, _bpk, BreakerLevels.from_vol(_bvol))
+                              if _bvol else ('ok', 1.0, ''))
         if _why2:
             logging.warning("BOOK circuit breaker: %s | %s", _why2, _bnote)
         _bscale = min(_bscale, _sc2)
