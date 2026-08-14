@@ -86,7 +86,7 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
              apply_constraints: bool, rng: np.random.Generator,
              cost_frac_of_credit: float | None = 0.06,
              per_name_cost: bool = False, cost_guard: float = 0.25,
-             cost_sd: float = 0.35) -> dict:
+             cost_sd: float = 0.35, cheapest_first: bool = False) -> dict:
     days = int(years * 252)
     names = BASKET[:n_names]
     # entry signal: common factor + idiosyncratic, thresholded to hit `pass_rate` marginally.
@@ -139,6 +139,22 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
         risk_path[d] = len(held) * pos_risk
         cand = [names[i] for i in np.where(fires[d])[0] if names[i] not in held]
         rng.shuffle(cand)
+        if cheapest_first and per_name_cost:
+            # WITHIN an overlap group only. Members of a group are the same bet by construction,
+            # so the only thing separating them is cost, and letting VRP rank decide means the
+            # cheapest often loses the slot — SPY (1.0% of credit) took fewer fills than QQQ
+            # (1.9%) and IWM (5.4%).
+            # ⚠ Deliberately NOT a global sort by cost. That scored far better here, but only
+            # because this model draws EVERY name's outcome from the same pool, so abandoning the
+            # VRP ranking costs nothing in the simulation and everything in reality. Reordering
+            # inside a group is defensible precisely because the members are interchangeable.
+            drop = set()
+            for a in cand:
+                for b in cand:
+                    if b != a and b in OVERLAP.get(a, set()) and name_cost(b) < name_cost(a):
+                        drop.add(a)
+                        break
+            cand = [c for c in cand if c not in drop]
         for nm in cand:
             if len(held) >= max_positions:
                 break
@@ -223,6 +239,9 @@ def main() -> None:
         ("  ... guard OFF (trade anyway)", dict(n_names=13, rho_signal=0.72, rho_pnl=0.47,
                                                 apply_constraints=True, per_name_cost=True,
                                                 cost_guard=9.99)),
+        ("  ... + cheapest-of-group first", dict(n_names=13, rho_signal=0.72, rho_pnl=0.47,
+                                                 apply_constraints=True, per_name_cost=True,
+                                                 cheapest_first=True)),
     ]:
         r = simulate(rng=rng, **common, **kw)
         rows.append((lab, r))
@@ -233,7 +252,8 @@ def main() -> None:
 
     print("\n  ⚠ Assumptions 1 (single names behave like SPX) and 5 (SPX-level costs) both bias")
     print("    these UPWARD. Read the 13-name rows as an upper bound on the improvement.")
-    pn = next((r for l, r in rows if "PER-NAME" in l), None)
+    pn = next((r for l, r in rows if "cheapest" in l), None) or \
+         next((r for l, r in rows if "PER-NAME" in l), None)
     if pn and pn.get("traded_names"):
         tot = sum(pn["traded_names"].values())
         print("\n  Which names actually trade once the guard is applied (share of all fills):")
