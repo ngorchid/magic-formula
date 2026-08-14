@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 warnings.filterwarnings("ignore")
 
 from backtest import summary_stats as _summary_stats  # noqa: E402
+from risk_guard import BreakerLevels  # noqa: E402
 
 
 def summary_stats(ret: pd.Series) -> dict:
@@ -72,6 +73,20 @@ def summary_stats(ret: pd.Series) -> dict:
 
 LEVELS = {"derisk": (0.15, 0.5), "reduce_only": (0.25, 0.0), "halt": (0.35, 0.0)}
 BOOK_LEVELS = {"derisk": (0.10, 0.5), "reduce_only": (0.18, 0.0), "halt": (0.25, 0.0)}
+
+# WHAT IS ACTUALLY DEPLOYED. Each runner seeds `blended_vol` with a backtest prior and feeds it
+# to BreakerLevels.from_vol, so with no live history the levels sit exactly at from_vol(prior).
+# Testing only the fixed 15/25/35 above measured levels nobody runs -- the lab was reporting a
+# -0.35 Sharpe for magic formula that its own deployed configuration does not incur.
+VOL_PRIOR = {"trend": 0.124, "magic-formula": 0.190, "options-vrp": 0.063}
+
+
+def live_levels(strategy: str) -> tuple[dict, str]:
+    """(levels dict for apply_breaker, label) as the strategy runs TODAY at go-live."""
+    lv = BreakerLevels.from_vol(VOL_PRIOR[strategy])
+    return ({"derisk": (lv.derisk, 0.5), "reduce_only": (lv.reduce_only, 0.0),
+             "halt": (lv.halt, 0.0)},
+            f"vol-scaled {lv.derisk:.0%}/{lv.reduce_only:.0%}/{lv.halt:.0%}")
 
 
 def apply_breaker(ret: pd.Series, levels: dict, lag: int = 1) -> tuple[pd.Series, pd.Series]:
@@ -251,6 +266,8 @@ def main() -> None:
     tr = trend_returns()
     print(f"\n  trend: {len(tr)} days, {tr.index[0].date()} -> {tr.index[-1].date()}")
     out.append(report("TREND OVERLAY, per-strategy levels 15/25/35", tr, LEVELS))
+    _tlv, _tlab = live_levels("trend")
+    out.append(report(f"TREND OVERLAY, LIVE {_tlab}", tr, _tlv))
 
     # tighter levels, to see whether the choice is even pivotal
     for lv, lab_ in [({"derisk": (0.10, 0.5), "reduce_only": (0.18, 0.0), "halt": (0.25, 0.0)},
@@ -268,6 +285,9 @@ def main() -> None:
                 series[nm] = r
                 print(f"\n  {nm}: {len(r)} days, {r.index[0].date()} -> {r.index[-1].date()}")
                 out.append(report(f"{nm.upper()}, levels 15/25/35", r, LEVELS))
+                # The row that matters: what the deployed configuration actually does.
+                _lv, _lab = live_levels(nm)
+                out.append(report(f"{nm.upper()}, LIVE {_lab}", r, _lv))
             else:
                 print(f"\n  {nm}: too short ({len(r)} days) — skipped")
         except Exception as e:  # noqa: BLE001
