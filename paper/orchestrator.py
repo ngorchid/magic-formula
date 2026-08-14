@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from paper.state import HOLD_DAYS, PortfolioState, Position
-from risk_guard import MarginLimits, RiskLimits, check_order, margin_check, price_sane
+from risk_guard import MarginLimits, RiskLimits, check_order, liquidity_check, price_sane
 
 
 @dataclass
@@ -137,6 +137,17 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     gross = _gross_scalar(vol, cfg)
     band = set(ranking.head(cfg.hold_n).index)          # names still "good enough" to hold
     marks = {t: float(adj[t].dropna().iloc[-1]) for t in adj.columns if adj[t].notna().any()}
+    # PRIOR CLOSE for the price-sanity guard, taken from the SAME adjusted series as `marks`.
+    # Using the same series matters: a legitimate split or dividend restates the whole history,
+    # so it moves both numbers and cannot false-positive. What survives the comparison is a bad
+    # print in the newest bar — which is precisely the one `_refresh_marks` just fetched live.
+    # Without this the guard ran with prior=None and only its NaN branch was reachable, so the
+    # split/feed-glitch check it exists for never executed.
+    priors: dict[str, float] = {}
+    for _t in adj.columns:
+        _hist = adj[_t].dropna()
+        if len(_hist) >= 2:
+            priors[_t] = float(_hist.iloc[-2])
     # Tilts are normalised over the names we actually INTEND to hold (the top_n ranking), not
     # the whole universe — otherwise the mean is set by names we will never buy.
     tilts = _normalised_tilts(vol.reindex(ranking.head(cfg.top_n).index).dropna(), cfg)
@@ -165,14 +176,14 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     # Skipped entirely in dry-run: there is no connection by design, so "margin unavailable" is
     # expected rather than anomalous. Warning about it offline would fire on every dry run and
     # train you to ignore the one that matters — when it appears in a LIVE run.
-    if (cfg.use_risk_guard and hasattr(broker, "margin_usage")
+    if (cfg.use_risk_guard and hasattr(broker, "margin_cushion")
             and not getattr(broker, "dry_run", False)):
-        mu = broker.margin_usage()
-        lvl, margin_scale, why = margin_check(*(mu if mu else (float("nan"), 0.0)),
-                                              limits=MarginLimits())
+        mu = broker.margin_cushion()
+        lvl, margin_scale, why = liquidity_check(*(mu if mu else (float("nan"), 0.0)),
+                                                limits=MarginLimits())
         if why:
             (logging.warning if lvl in ("derisk", "halt", "unknown") else logging.info)(
-                "margin: %s", why)
+                "liquidity: %s", why)
 
     # ---- buys: fill toward top_n at ≤ max_new_buys_per_day, highest-ranked not held ----
     held = state.tickers
@@ -196,7 +207,7 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 continue
             if cfg.use_risk_guard:
                 lim = RiskLimits.for_equities(state.nav(marks, fx) or cfg.budget)
-                ok_px = price_sane(t, price_local, None, lim)
+                ok_px = price_sane(t, price_local, priors.get(t), lim)
                 if not ok_px:
                     logging.info("risk reject %s", ok_px.reason)
                     rejects.append(ok_px.reason)

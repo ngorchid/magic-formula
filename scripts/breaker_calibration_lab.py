@@ -50,7 +50,8 @@ def summary_stats(ret: pd.Series) -> dict:
     larger because the exponent is 252/n, with n the observation COUNT).
 
     The symptom that exposed it: its worst drawdown came out at 0.91 sigma against 1.90 for
-    trend and 1.19 for magic formula. A book being that much safer in its own risk units had no
+    trend and 1.19 for magic formula (that 1.19 was itself wrong -- see
+    `magic_returns`; the deployed series gives 1.89). A book being that much safer in its own risk units had no
     mechanism behind it. maxDD itself is path-based and unaffected.
     """
     out = dict(_summary_stats(ret))
@@ -212,10 +213,30 @@ def vrp_returns(budget: float = 100_000.0) -> pd.Series:
     return eq.pct_change().dropna()
 
 
+MAGIC_SERIES = ROOT / "results" / "best_magic" / "best_sp500_pit_all.csv"
+
+
 def magic_returns() -> pd.Series:
-    """Daily net returns of the enhanced magic formula backtest."""
-    from strategies.magic_formula import MagicFormula, MagicFormulaConfig
-    return MagicFormula(MagicFormulaConfig()).run().net_returns.dropna()
+    """Daily net returns of THE DEPLOYED enhanced magic formula (PIT S&P 500).
+
+    ⚠ This used to call `MagicFormula(MagicFormulaConfig())` while claiming to be the enhanced
+    variant. That is BASE GREENBLATT — a different, and on this data losing, strategy
+    (ann -3.19%, Sharpe -0.06) — so every breaker level calibrated here was measured on something
+    that is not deployed. It is also what produced the "magic formula's worst drawdown is 1.19
+    sigma" figure quoted in this file's header: that came from the 4.9-year SimFin rebuild
+    (vol 21.6%, maxDD -25.8%). On the authoritative 14.6-year PIT series the same quantity is
+    -35.8% / 19.0% = 1.89 sigma, and the live derisk level fires well inside it.
+
+    Reads the canonical artifact rather than re-deriving it, and RAISES if absent. Falling back
+    to a different backtest is how the wrong strategy got measured in the first place, so a
+    missing file must stop the run, not quietly change what is being calibrated.
+    """
+    if not MAGIC_SERIES.exists():
+        raise FileNotFoundError(
+            f"{MAGIC_SERIES} not found — run `python3 scripts/run_best_magic.py` first. "
+            f"Refusing to substitute another backtest: this lab sets live risk thresholds.")
+    s = pd.read_csv(MAGIC_SERIES, index_col=0, parse_dates=True)["net_return"].dropna()
+    return s
 
 
 def main() -> None:
