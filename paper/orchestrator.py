@@ -112,9 +112,23 @@ def _size_shares(ticker: str, price_local: float, fx: float, tilts: pd.Series,
     tilt = float(tilts.get(ticker, 1.0))
     if tilt != tilt or tilt <= 0:
         tilt = 1.0
+    # Floor the target at 0. `slot_usd` is normally non-negative, but it tracks NAV through
+    # `2 * equal_weight`, so an account at NEGATIVE equity produces a negative slot and
+    # `int(-1000 // 10)` is -100 — a BUY for -100 shares. check_order does reject a non-positive
+    # quantity, but the sizer must not emit one in the first place: the guard is the second line
+    # of defence, not the only one, and it can be disabled via cfg.use_risk_guard.
     target_usd = min(slot_usd * tilt, max(float(cash_usd), 0.0))
     denom = price_local * fx
-    return int(target_usd // denom) if denom and denom > 0 else 0
+    # ONE non-positive guard, deliberately. `slot_usd` is normally >= 0 but it tracks NAV via
+    # `2 * equal_weight` in _slot_usd, so an account at NEGATIVE equity yields a negative slot and
+    # `int(-1000 // 10)` is -100 — a BUY order for -100 shares. check_order does reject a
+    # non-positive quantity, but the sizer must not emit one: the guard is the second line of
+    # defence, not the only one, and it can be switched off via cfg.use_risk_guard.
+    # Kept as a single check rather than belt-and-braces: overlapping guards that no test can
+    # tell apart survive mutation testing and give false confidence.
+    if target_usd <= 0 or not denom or denom <= 0 or denom != denom:
+        return 0
+    return int(target_usd // denom)
 
 
 def _gross_scalar(vol: pd.Series, cfg: PaperConfig) -> float:

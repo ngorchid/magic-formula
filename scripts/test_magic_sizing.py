@@ -1,0 +1,290 @@
+"""Tests for the magic-formula SIZING path — the code that decides order size.
+
+WHY THIS EXISTS. `_slot_usd`, `_size_shares`, `_normalised_tilts` and `_gross_scalar` had NO
+coverage of any kind before 2026-08-14 — they were referenced nowhere outside `orchestrator.py`
+— despite three real bugs having been found in them by inspection, each of which reached the
+live path. This is also the first strategy going to real money, and sizing errors are the
+expensive kind: a guard that fails wrong blocks a trade, a sizer that fails wrong sends one.
+
+⚠ EVERY CASE USES THE REAL `Check`, `PortfolioState` AND `Position`. The risk_guard suite was
+found on 2026-08-14 to contain four assertions handed bare `type("C", (), {...})()` objects,
+which define no `__bool__` and are therefore ALWAYS truthy — those cases had never been able to
+fail. Do not introduce an ad-hoc stand-in here. If a real object is awkward to build, that is
+information about the design, not a reason for a fake.
+
+⚠ THIS SUITE IS MUTATION-TESTED. Seeded faults must FAIL it. Run
+`python3 scripts/mutate_magic_sizing.py` after changing anything here; a case that survives its
+own mutation is decoration.
+
+THE THREE REGRESSIONS, each marked REGRESSION below:
+  1. Tilts did not average 1, so gross landed anywhere in 0.92x-1.09x of budget (theoretically
+     0.5x-2.0x) and `_gross_scalar` is clipped to <=1 so it can only reduce, never correct an
+     overshoot.
+  2. The cash cap was applied to `slot_usd` BEFORE the inverse-vol tilt multiplied it, so a
+     high-tilt name could overdraw. Live cash reached -$2,370.
+  3. A FULL book collapsed `slots_free` to `max(0, 1) = 1`, aiming the entire accumulated-cash
+     gap at ONE order (~16% of NAV), which breached the 15% single-order cap and rejected the
+     whole ranked list — 362 alerts on 2026-08-13.
+
+Run: python3 scripts/test_magic_sizing.py
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from paper.orchestrator import (PaperConfig, _gross_scalar,  # noqa: E402
+                                _normalised_tilts, _size_shares, _slot_usd)
+from paper.state import PortfolioState, Position  # noqa: E402
+from risk_guard import Check, RiskLimits, check_order  # noqa: E402
+
+CFG = PaperConfig()
+fails, ran = [], 0
+
+
+def expect(label: str, got, want_ok: bool = True) -> None:
+    """`got` MUST define __bool__ (use Check). A bare object is always truthy — see module docs."""
+    global ran
+    ran += 1
+    ok = bool(got)
+    if ok != want_ok:
+        fails.append(f"{label}: expected {'PASS' if want_ok else 'REJECT'}, got "
+                     f"{'PASS' if ok else 'REJECT'} ({getattr(got, 'reason', '')})")
+    print(f"  [{'ok ' if ok == want_ok else 'FAIL'}] {label:60} "
+          f"-> {'PASS' if ok else 'REJECT'}"
+          f"{'' if ok == want_ok else '  | ' + getattr(got, 'reason', '')}")
+
+
+def close(a: float, b: float, tol: float = 1e-9) -> Check:
+    return Check(abs(a - b) <= tol, f"{a!r} vs {b!r} (tol {tol})")
+
+
+def book(cash: float, holdings: dict[str, tuple[float, float]],
+         ccy: dict[str, str] | None = None) -> PortfolioState:
+    """A real PortfolioState. holdings = {ticker: (shares, entry_price)}."""
+    ccy = ccy or {}
+    return PortfolioState(cash=cash, positions=[
+        Position(t, sh, px, "2026-08-01", 1.0, ccy.get(t, "USD"))
+        for t, (sh, px) in holdings.items()])
+
+
+# =====================================================================================
+print("=" * 92)
+print("MAGIC-FORMULA SIZING")
+print("=" * 92)
+print("\n--- _normalised_tilts: must average EXACTLY 1 for ANY vol cross-section ---")
+print("    (REGRESSION 1: when it did not, gross landed off budget and nothing could correct it)")
+
+# The cap and the floor bind asymmetrically, and which one dominates depends entirely on the
+# cross-section of whichever names rank top that day. These two are the adversarial extremes.
+LOWSKEW = pd.Series([0.01] * 25 + [1.00] * 5, index=[f"L{i}" for i in range(30)])
+HIGHSKEW = pd.Series([1.00] * 25 + [0.01] * 5, index=[f"H{i}" for i in range(30)])
+RANDOM = pd.Series(np.random.default_rng(0).uniform(0.05, 0.9, 30),
+                   index=[f"R{i}" for i in range(30)])
+
+for lab, v in [("low-vol-skewed (2.0 cap binds)", LOWSKEW),
+               ("high-vol-skewed (0.5 floor binds)", HIGHSKEW),
+               ("random cross-section", RANDOM),
+               ("uniform vol", pd.Series([0.2] * 30, index=[f"U{i}" for i in range(30)]))]:
+    t = _normalised_tilts(v, CFG)
+    expect(f"tilts average exactly 1 — {lab}", close(float(t.mean()), 1.0, 1e-12))
+    expect(f"tilts sum to n — {lab}", close(float(t.sum()), float(len(v)), 1e-9))
+
+# Show the raw overshoot the normalisation removes, so the number is on the record.
+_ref = float(np.nanmedian(HIGHSKEW.values))
+_raw = np.clip(_ref / HIGHSKEW, *CFG.inv_vol_clip)
+print(f"    raw (un-normalised) mean on the high-skew book = {_raw.mean():.4f} "
+      f"-> book would run {_raw.mean():.1%} of budget with no way to correct it")
+expect("the adversarial case really does overshoot un-normalised (guard is not vacuous)",
+       Check(_raw.mean() > 1.10, f"raw mean {_raw.mean():.4f}"))
+
+# Shape must be preserved: normalising changes the level, not the structure.
+t_hs = _normalised_tilts(HIGHSKEW, CFG)
+expect("tilt SHAPE preserved (rank corr with raw = 1)",
+       close(float(pd.Series(_raw.values).corr(pd.Series(t_hs.values), method="spearman")), 1.0, 1e-9))
+expect("tilts stay within the clip band after rescaling (no name exceeds 2x the mean)",
+       Check(float(t_hs.max()) <= 2.0 / float(_raw.mean()) + 1e-9, f"max {t_hs.max():.4f}"))
+
+print("\n--- _normalised_tilts: degenerate inputs must not produce a poisoned size ---")
+expect("empty vol -> empty tilts", Check(len(_normalised_tilts(pd.Series(dtype=float), CFG)) == 0))
+_alln = _normalised_tilts(pd.Series([np.nan] * 5, index=list("abcde")), CFG)
+expect("all-NaN vol -> all tilts 1.0", Check(bool((_alln == 1.0).all()), f"{_alln.tolist()}"))
+_zero = _normalised_tilts(pd.Series([0.0] * 5, index=list("abcde")), CFG)
+expect("zero-vol (zero median) -> all tilts 1.0", Check(bool((_zero == 1.0).all()), f"{_zero.tolist()}"))
+_one = _normalised_tilts(pd.Series([0.2], index=["X"]), CFG)
+expect("single name -> tilt exactly 1.0", close(float(_one.iloc[0]), 1.0, 1e-12))
+_mixed = _normalised_tilts(pd.Series([0.1, 0.2, np.nan, 0.4], index=list("abcd")), CFG)
+expect("NaN in one name -> finite tilts, mean still 1",
+       Check(bool(np.isfinite(_mixed.values).all()) and abs(_mixed.mean() - 1.0) < 1e-12,
+             f"{_mixed.tolist()}"))
+_inf = _normalised_tilts(pd.Series([0.0, 0.2, 0.3, 0.4], index=list("abcd")), CFG)
+expect("zero vol in one name -> no inf leaks through",
+       Check(bool(np.isfinite(_inf.values).all()), f"{_inf.tolist()}"))
+
+print("\n--- _size_shares: the cash cap must bind AFTER the tilt ---")
+print("    (REGRESSION 2: capping slot_usd first let slot x tilt overdraw; cash hit -$2,370)")
+
+TIL = pd.Series({"AAA": 1.70, "BBB": 1.00, "CCC": 0.50})
+# slot 1,000 x tilt 1.7 = 1,700 wanted, but only 1,200 of cash exists.
+sh = _size_shares("AAA", price_local=10.0, fx=1.0, tilts=TIL, slot_usd=1000.0, cash_usd=1200.0)
+expect("REGRESSION: high tilt cannot spend more than cash",
+       Check(sh * 10.0 <= 1200.0 + 1e-9, f"{sh} sh x $10 = ${sh*10:,.0f} vs $1,200 cash"))
+expect("  ... and it does spend the cash it has (not silently zero)", Check(sh == 120, f"{sh}"))
+# The pre-fix arithmetic, stated explicitly so the regression cannot be reintroduced unnoticed.
+_buggy = int(min(1000.0, 1200.0) * 1.70 // 10.0)
+expect("  ... the OLD cap-before-tilt arithmetic really did overdraw (guard is not vacuous)",
+       Check(_buggy * 10.0 > 1200.0, f"old path would buy {_buggy} sh = ${_buggy*10:,.0f}"))
+
+for lab, tilt_v, slot, cash, px, fxr, want in [
+        ("tilt 1.0, ample cash", 1.00, 1000.0, 99_999.0, 10.0, 1.0, 100),
+        ("tilt 0.5 shrinks the order", 0.50, 1000.0, 99_999.0, 10.0, 1.0, 50),
+        ("FX applied to the price", 1.00, 1000.0, 99_999.0, 10.0, 2.0, 50),
+        ("rounds DOWN to whole shares", 1.00, 1005.0, 99_999.0, 10.0, 1.0, 100)]:
+    got = _size_shares("Z", px, fxr, pd.Series({"Z": tilt_v}), slot, cash)
+    expect(f"_size_shares: {lab}", Check(got == want, f"got {got}, want {want}"))
+
+for lab, kw in [("zero cash -> 0 shares", dict(cash_usd=0.0)),
+                ("negative cash -> 0 shares, never negative", dict(cash_usd=-5_000.0)),
+                ("zero price -> 0 shares (no ZeroDivisionError)", dict(price_local=0.0)),
+                ("NaN price -> 0 shares", dict(price_local=float("nan"))),
+                ("zero fx -> 0 shares", dict(fx=0.0)),
+                ("zero slot -> 0 shares", dict(slot_usd=0.0)),
+                ("negative slot -> 0 shares", dict(slot_usd=-1000.0))]:
+    base = dict(ticker="Z", price_local=10.0, fx=1.0, tilts=pd.Series({"Z": 1.0}),
+                slot_usd=1000.0, cash_usd=50_000.0)
+    base.update(kw)
+    got = _size_shares(**base)
+    expect(f"_size_shares: {lab}", Check(got == 0, f"got {got}"))
+
+for lab, tv in [("NaN tilt -> treated as 1.0", float("nan")),
+                ("zero tilt -> treated as 1.0", 0.0),
+                ("negative tilt -> treated as 1.0", -1.0)]:
+    got = _size_shares("Z", 10.0, 1.0, pd.Series({"Z": tv}), 1000.0, 50_000.0)
+    expect(f"_size_shares: {lab}", Check(got == 100, f"got {got}, want 100"))
+got = _size_shares("MISSING", 10.0, 1.0, TIL, 1000.0, 50_000.0)
+expect("_size_shares: ticker absent from tilts -> defaults to 1.0", Check(got == 100, f"got {got}"))
+
+print("\n--- _slot_usd: a FULL book must not aim the whole gap at one order ---")
+print("    (REGRESSION 3: slots_free collapsed to 1, sizing one order at ~16% of NAV)")
+
+# 30 held of top_n 30, and cash has accumulated from sells.
+full = book(cash=16_000.0, holdings={f"T{i}": (100.0, 28.0) for i in range(30)})
+marks = {f"T{i}": 28.0 for i in range(30)}
+nav_full = full.nav(marks, {})
+slot_full = _slot_usd(full, marks, {}, CFG, 1.0)
+eq_w = nav_full / CFG.top_n
+print(f"    NAV ${nav_full:,.0f}, 30/30 held, ${full.cash:,.0f} idle "
+      f"-> slot ${slot_full:,.0f} (equal-weight ${eq_w:,.0f})")
+expect("REGRESSION: full-book slot capped at 2x equal weight",
+       Check(slot_full <= 2.0 * eq_w + 1e-9, f"${slot_full:,.0f} vs 2x EW ${2*eq_w:,.0f}"))
+expect("REGRESSION: full-book slot stays under the 15% single-order cap",
+       Check(slot_full < 0.15 * nav_full, f"${slot_full:,.0f} = {slot_full/nav_full:.1%} of NAV"))
+# The pre-fix arithmetic, so the regression is pinned rather than merely absent today.
+_old_slot = max(nav_full * 1.0 - full.positions_value_usd(marks, {}), 0.0) / 1
+expect("  ... the OLD slots_free=1 arithmetic really did breach 15% (guard is not vacuous)",
+       Check(_old_slot > 0.15 * nav_full, f"old slot ${_old_slot:,.0f} = {_old_slot/nav_full:.1%}"))
+# And prove it end-to-end against the actual order guard that produced the 362 alerts.
+_lim = RiskLimits.for_equities(nav_full)
+_shares_new = _size_shares("T0", 28.0, 1.0, pd.Series({"T0": 1.0}), slot_full, full.cash)
+_shares_old = _size_shares("T0", 28.0, 1.0, pd.Series({"T0": 1.0}), _old_slot, full.cash)
+expect("REGRESSION end-to-end: the fixed slot PASSES check_order",
+       check_order("T0", "BUY", _shares_new, 28.0, 1.0, _lim, gross_notional=0.0))
+expect("  ... and the old slot would have been REJECTED by it",
+       check_order("T0", "BUY", _shares_old, 28.0, 1.0, _lim, gross_notional=0.0), want_ok=False)
+
+print("\n--- _slot_usd: the ordinary cases ---")
+empty = book(cash=100_000.0, holdings={})
+expect("empty book -> slot = NAV/top_n",
+       close(_slot_usd(empty, {}, {}, CFG, 1.0), 100_000.0 / CFG.top_n, 1e-6))
+half = book(cash=50_000.0, holdings={f"T{i}": (100.0, 33.3333333333) for i in range(15)})
+m_half = {f"T{i}": 33.3333333333 for i in range(15)}
+_nav_h = half.nav(m_half, {})
+_inv_h = half.positions_value_usd(m_half, {})
+expect("partial book -> remaining gap split across FREE slots",
+       close(_slot_usd(half, m_half, {}, CFG, 1.0),
+             min((_nav_h - _inv_h) / (CFG.top_n - 15), 2.0 * _nav_h / CFG.top_n), 1e-6))
+over = book(cash=0.0, holdings={f"T{i}": (100.0, 50.0) for i in range(20)})
+m_over = {f"T{i}": 50.0 for i in range(20)}
+expect("over-invested (gross_scalar shrinks the target) -> slot floors at 0, never negative",
+       Check(_slot_usd(over, m_over, {}, CFG, 0.5) >= 0.0, ""))
+expect("gross_scalar 0 -> slot 0", close(_slot_usd(empty, {}, {}, CFG, 0.0), 0.0, 1e-9))
+expect("gross_scalar 0.5 halves the slot",
+       close(_slot_usd(empty, {}, {}, CFG, 0.5), 50_000.0 / CFG.top_n, 1e-6))
+# The gap is measured against NAV, not cfg.budget: a drawn-down book must not top up to the
+# original number with money the account no longer has.
+drawn = book(cash=10_000.0, holdings={f"T{i}": (100.0, 20.0) for i in range(10)})
+m_drawn = {f"T{i}": 20.0 for i in range(10)}
+expect("drawn-down book sizes off NAV, not cfg.budget",
+       Check(_slot_usd(drawn, m_drawn, {}, CFG, 1.0) < 100_000.0 / CFG.top_n,
+             f"slot ${_slot_usd(drawn, m_drawn, {}, CFG, 1.0):,.0f}"))
+expect("slot is never negative for any gross_scalar",
+       Check(all(_slot_usd(over, m_over, {}, CFG, g) >= 0.0 for g in (0.0, 0.25, 0.5, 1.0)), ""))
+
+print("\n--- _gross_scalar: clipped to <=1, so it can only ever REDUCE ---")
+expect("high vol -> scales down",
+       Check(_gross_scalar(pd.Series([0.60] * 30), CFG) < 1.0,
+             f"{_gross_scalar(pd.Series([0.60]*30), CFG):.4f}"))
+expect("low vol -> clipped at 1.0 (no leverage)",
+       close(_gross_scalar(pd.Series([0.05] * 30), CFG), 1.0, 1e-12))
+expect("never exceeds 1.0 for any vol",
+       Check(all(_gross_scalar(pd.Series([v] * 30), CFG) <= 1.0
+                 for v in (0.001, 0.01, 0.05, 0.2, 0.5, 2.0)), ""))
+expect("never negative for any vol",
+       Check(all(_gross_scalar(pd.Series([v] * 30), CFG) >= 0.0
+                 for v in (0.001, 0.01, 0.05, 0.2, 0.5, 2.0)), ""))
+expect("empty vol -> 1.0", close(_gross_scalar(pd.Series(dtype=float), CFG), 1.0, 1e-12))
+expect("NaN median -> 1.0", close(_gross_scalar(pd.Series([np.nan] * 5), CFG), 1.0, 1e-12))
+expect("zero median -> 1.0", close(_gross_scalar(pd.Series([0.0] * 5), CFG), 1.0, 1e-12))
+
+print("\n--- integration: fill a book from cash and check the invariants hold throughout ---")
+print("    (REGRESSION 1 end-to-end: gross must land ON budget, never ~2x)")
+
+st = book(cash=100_000.0, holdings={})
+tickers = [f"N{i}" for i in range(CFG.top_n)]
+vols = pd.Series(np.random.default_rng(7).uniform(0.10, 0.70, CFG.top_n), index=tickers)
+tilts = _normalised_tilts(vols, CFG)
+px = {t: 40.0 for t in tickers}
+g = _gross_scalar(vols, CFG)
+min_cash, max_order_frac = float("inf"), 0.0
+for t in tickers:
+    marks_now = {k: px[k] for k in st.tickers | {t}}
+    slot = _slot_usd(st, marks_now, {}, CFG, g)
+    n = _size_shares(t, px[t], 1.0, tilts, slot, st.cash)
+    if n <= 0:
+        continue
+    nav_now = st.nav(marks_now, {})
+    max_order_frac = max(max_order_frac, n * px[t] / nav_now)
+    st.open_position(Position(t, n, px[t], "2026-08-02", 1.0, "USD"))
+    min_cash = min(min_cash, st.cash)
+
+final_marks = {t: px[t] for t in st.tickers}
+nav_f = st.nav(final_marks, {})
+inv_f = st.positions_value_usd(final_marks, {})
+print(f"    filled {len(st.positions)} names, NAV ${nav_f:,.0f}, invested ${inv_f:,.0f} "
+      f"({inv_f/nav_f:.1%} of NAV), gross_scalar {g:.3f}, min cash ${min_cash:,.0f}")
+expect("REGRESSION: gross never exceeds NAV (was reaching ~2x budget)",
+       Check(inv_f <= nav_f + 1e-6, f"invested ${inv_f:,.0f} vs NAV ${nav_f:,.0f}"))
+expect("REGRESSION: cash never went negative during the fill (was -$2,370)",
+       Check(min_cash >= -1e-9, f"min cash ${min_cash:,.2f}"))
+expect("gross lands ON target, not far under (>=90% of the vol-scaled aim)",
+       Check(inv_f >= 0.90 * nav_f * g, f"{inv_f/(nav_f*g):.1%} of target"))
+expect("no single order exceeded the 15% cap during the fill",
+       Check(max_order_frac <= 0.15, f"largest order {max_order_frac:.2%} of NAV"))
+expect("every order passed the real check_order guard",
+       Check(all(check_order(p.ticker, "BUY", p.shares, p.entry_price, 1.0,
+                             RiskLimits.for_equities(nav_f), gross_notional=0.0).ok
+                 for p in st.positions), ""))
+
+print("\n" + "=" * 92)
+if fails:
+    print(f"{len(fails)} FAILURE(S) of {ran}:")
+    for f in fails:
+        print("   " + f)
+    sys.exit(1)
+print(f"all {ran} sizing checks behaved as expected")
