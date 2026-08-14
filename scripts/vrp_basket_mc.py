@@ -74,10 +74,35 @@ SPREAD = {           # fraction of credit; class-assigned except where measured
 }
 MEASURED = {"SPY", "SBUX", "CAT", "PFE"}
 
+# MAX LOSS PER CONTRACT ($). A defined-risk spread's max loss is the STRIKE WIDTH x 100, and the
+# 16d->10d width is spot x (z10-z16) x IV x sqrt(T) ~= spot x 0.091 x IV, rounded to the name's
+# real strike grid. Calibration check: that formula predicts $86.9/ct of width for SPX, and the
+# validated OPRA pool's mean max loss is $86.2/ct. Built by the block in this file's __main__
+# guard; see results/spx_vrp/maxloss_per_contract.csv.
+#
+# WHY IT MATTERS. The live sizer floors to whole contracts —
+#     contracts = int((risk_per_trade * budget) // (max_loss * 100))
+# — so a name whose single contract risks more than the per-position budget is not sized small,
+# it is NOT TRADED AT ALL. Continuous sizing hides that entirely, and it is the binding
+# constraint at small account sizes.
+MAXLOSS = {"SPY": 1100, "QQQ": 1900, "IWM": 500, "NVDA": 1000, "AAPL": 1000, "XLV": 300,
+           "PFE": 50, "XOM": 400, "XLE": 200, "SBUX": 200, "MCD": 500, "DE": 2000, "CAT": 4000}
 
-def name_cost(nm: str) -> float:
-    """Total round-trip cost as a fraction of credit for one name."""
-    return 2.60 / CREDIT[nm] + SPREAD[nm]
+# CREDIT/WIDTH from the validated pool. The CREDIT dict above implies 7-40% of width per name,
+# but a 16d/10d spread collects ~8.5% (732/8622 in the OPRA pool) — so those credits cannot all
+# be 16d/10d spreads and are most likely an off-hours dry run with junk IV picking wrong strikes.
+# This matters beyond sizing: commission is $2.60/credit, so overstated credit UNDERSTATES cost.
+POOL_CREDIT_FRAC = 732.0 / 8622.0
+
+
+def name_cost(nm: str, credit_basis: str = "dict") -> float:
+    """Total round-trip cost as a fraction of credit for one name.
+
+    credit_basis="pool" re-derives credit as max_loss x 8.5% instead of trusting the CREDIT
+    dict, which is internally inconsistent with a 16d/10d structure (see POOL_CREDIT_FRAC).
+    """
+    credit = CREDIT[nm] if credit_basis == "dict" else MAXLOSS[nm] * POOL_CREDIT_FRAC
+    return 2.60 / credit + SPREAD[nm]
 
 
 def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
@@ -86,7 +111,8 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
              apply_constraints: bool, rng: np.random.Generator,
              cost_frac_of_credit: float | None = 0.06,
              per_name_cost: bool = False, cost_guard: float = 0.25,
-             cost_sd: float = 0.35, cheapest_first: bool = False) -> dict:
+             cost_sd: float = 0.35, cheapest_first: bool = False,
+             integer_contracts: bool = False, credit_basis: str = "dict") -> dict:
     days = int(years * 252)
     names = BASKET[:n_names]
     # entry signal: common factor + idiosyncratic, thresholded to hit `pass_rate` marginally.
@@ -121,7 +147,16 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
         ror_pool = np.sort((pool["pnl"] / pool["max_loss"]).values - haircut)
     hold_pool = pool["hold"].clip(lower=1).values
     pos_risk = risk_per_trade * budget
+    _cost = {nm: name_cost(nm, credit_basis) for nm in names}
+    # Whole-contract sizing, exactly as strategy.py:368 does it. A name that cannot fit one
+    # contract inside the per-position budget is dropped from the tradeable set entirely.
+    if integer_contracts:
+        n_ct = {nm: int(pos_risk // MAXLOSS[nm]) for nm in names}
+        unsizeable = {nm for nm in names if n_ct[nm] == 0}
+    else:
+        n_ct, unsizeable = {nm: None for nm in names}, set()
 
+    n_unsizeable = 0
     held = {}            # name -> (days_left, pnl)
     daily_pnl = np.zeros(days)
     risk_path = np.zeros(days)
@@ -151,13 +186,16 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
             drop = set()
             for a in cand:
                 for b in cand:
-                    if b != a and b in OVERLAP.get(a, set()) and name_cost(b) < name_cost(a):
+                    if b != a and b in OVERLAP.get(a, set()) and _cost[b] < _cost[a]:
                         drop.add(a)
                         break
             cand = [c for c in cand if c not in drop]
         for nm in cand:
             if len(held) >= max_positions:
                 break
+            if nm in unsizeable:
+                n_unsizeable += 1
+                continue
             if apply_constraints:
                 if OVERLAP.get(nm, set()) & set(held):
                     continue
@@ -177,12 +215,15 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
                 # it exceeds the guard rather than taken at a loss. This is the difference
                 # between "CAT drags the book at 28%" and "CAT simply does not trade" — the
                 # former was what the uniform-cost run assumed, and it is not what the code does.
-                c = float(name_cost(nm) * np.exp(rng.normal(0, cost_sd) - cost_sd ** 2 / 2))
+                c = float(_cost[nm] * np.exp(rng.normal(0, cost_sd) - cost_sd ** 2 / 2))
                 if c > cost_guard:
                     n_skipped += 1
                     continue
                 ror -= max(c - 0.06, 0.0) * credit_frac   # pool already carries ~6% (SPX)
-            held[nm] = (int(hold_pool[rng.integers(len(hold_pool))]), ror * pos_risk)
+            # Rounding DOWN leaves part of the per-position budget unused; that idle capital is
+            # real and must show up as a lower return on the sleeve, not be quietly ignored.
+            risk_used = pos_risk if not integer_contracts else n_ct[nm] * MAXLOSS[nm]
+            held[nm] = (int(hold_pool[rng.integers(len(hold_pool))]), ror * risk_used)
             n_trades += 1
             traded_names[nm] = traded_names.get(nm, 0) + 1
     r = daily_pnl / budget
@@ -196,6 +237,7 @@ def simulate(pool: pd.DataFrame, *, n_names: int, budget: float, years: float,
             "pct_days_flat": float((risk_path == 0).mean()),
             "skipped_yr": n_skipped / years,
             "skip_rate": n_skipped / max(n_skipped + n_trades, 1),
+            "unsizeable_names": sorted(unsizeable), "n_unsizeable": n_unsizeable,
             "traded_names": traded_names}
 
 
