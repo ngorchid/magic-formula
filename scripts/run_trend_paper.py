@@ -1,4 +1,21 @@
-"""Trend-overlay paper runner — compute the target futures book and (optionally) trade it.
+"""⚠ SUPERSEDED — DO NOT TRADE FROM HERE. The live trend overlay is the `trend-overlay` REPO.
+
+This is the pre-split copy. It is kept only because `strategies/trend_futures/overlay.py` still
+backs the research backtest (`scripts/run_trend_overlay.py`) and the skew lab. Its LIVE path is
+DISABLED, because the filename is identical to the real runner and it carries NONE of the fixes
+made since the split:
+
+  * no vol floor / per-market cap / gross cap — this is the raw inverse-vol sizing whose gross
+    ran 2.8x budget at the median and hit 4.8x, with the vol-target circular and so a no-op
+  * no hysteresis on contract counts, no risk_guard (kill switch, order guard, margin ceiling,
+    circuit breaker, reconciliation, alerts)
+  * wrong IB contract symbols: fx_jpy M6J (should be MJY) and silver SIL (should be SI with the
+    micro multiplier) — both Error 200 every run
+
+Running `--live` from the wrong directory would place futures orders, unguarded, at up to ~4.8x
+budget. Use the trend-overlay repo.
+
+Trend-overlay paper runner — compute the target futures book and (optionally) trade it.
 
 Default is a DRY RUN (no IB connection): pulls the ETF-proxy history, computes the blended
 TSMOM signal, sizes target contracts to the budget, and prints the book + the order plan vs.
@@ -93,6 +110,13 @@ def main() -> None:
     print(f"  {'GROSS notional':11s} {'':5s} {'':>7s} {'':>8s} {'':>10s} {gross:>12,.0f}")
     print(f"  net notional = {tgt['notional_used'].sum():+,.0f}   "
           f"gross/budget = {gross/cfg.budget:.1f}x")
+
+    if args.live:
+        raise SystemExit(
+            "REFUSED: this is the superseded pre-split copy and has none of the guards "
+            "(no gross cap, no risk_guard, wrong IB symbols for JPY/silver).\n"
+            "Trade from the trend-overlay repo instead: "
+            "cd ../trend-overlay && python scripts/run_trend_paper.py --live")
 
     print("\n[3/3] order plan (roll + safety + reconcile) …")
     targets = {m: int(r["contracts"]) for m, r in tgt.iterrows()}
