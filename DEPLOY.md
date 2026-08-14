@@ -1,8 +1,17 @@
 # Windows deployment — Magic Formula paper trading
 
-Runs `scripts/run_paper.py` every weekday at **20:00 CET** on the Windows box, alongside
-the contract strategy. US names fill same-day (RTH); European names queue to the next EU
-open. All prices/fundamentals come from **yfinance**; **IB** is used only to place orders.
+Runs `scripts/run_paper.py` every weekday at **16:30 CET** on the Windows box, alongside
+the contract strategy. US names fill same-day (RTH).
+
+**Why 16:30 and not later:** the three strategies share one IB account and margin is
+claimed FIRST-COME-FIRST-SERVED — whoever runs last is the one the account-wide
+liquidity floor blocks. This is the highest-Sharpe sleeve (0.96 vs trend 0.74, VRP 0.52)
+and it is the collateral the other two borrow against, so it must go first. Order is
+magic-formula 16:30 -> trend 18:00 -> options-vrp 21:30 CET.
+
+16:30 CET is 10:30 ET, an hour after the US open (liquid, spreads settled) and — unlike
+the previous 20:00 — while the European market is still open, so EU names now fill
+same-day instead of queueing to the next EU open. All prices/fundamentals come from **yfinance**; **IB** is used only to place orders.
 
 ## 1. Clone
 
@@ -59,14 +68,14 @@ python scripts\run_paper.py --force
 ```
 Check `results\paper\run.log` and that the email arrived.
 
-## 6. Schedule (weekdays 20:00)
+## 6. Schedule (weekdays 16:30 CET — must run FIRST)
 
 Uses the box's **local time** — set the box to CET, or adjust the time. One-liner:
 
 ```bat
 schtasks /Create /TN "MagicFormulaPaper" ^
   /TR "C:\trading\magic-formula\scripts\run_paper.bat" ^
-  /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 20:00 /F
+  /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 16:30 /F
 ```
 (Adjust the path.) The script self-skips weekends as a backstop. Output appends to
 `results\paper\run.log`.
