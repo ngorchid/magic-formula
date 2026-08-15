@@ -64,6 +64,12 @@ class Config:
     # why the daily-rebalanced variance-swap proxy looked far more protective than reality.
     regime_thr: float | None = None
     regime_continuous: bool = False
+    # EXIT-side regime rule, INDEPENDENT of the entry gate. The entry-only gate was removed
+    # 2026-08-15 because the damage demonstrably arrives in positions ALREADY OPEN (Aug 2024: the
+    # gate blocked nothing, protected nothing, and an open spread lost $2,186). Testing an exit
+    # rule requires it to be separable from entry, which `regime_continuous` was not: it demanded
+    # regime_thr, which also gates entry, so the two effects could not be told apart.
+    regime_exit_thr: float | None = None
     cp: str = "P"                   # "P" = bull put spread (default), "C" = bear call spread
 
     @property
@@ -144,7 +150,10 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
     DOLLARS. Needed to build an honest equity curve: attributing a trade's P&L to its exit date
     hides every intra-trade drawdown, which for a 30-45 day short-put hold is most of the
     drawdown there is. Default None leaves behaviour unchanged."""
-    if cfg.regime_thr is not None and ratio is None:
+    # Fetch the ratio if EITHER side needs it. Keying this on regime_thr alone meant an
+    # exit-only config left `ratio` as None and the exit rule silently never fired — reporting
+    # as "the rule does nothing" rather than "the rule was never evaluated".
+    if (cfg.regime_thr is not None or cfg.regime_exit_thr is not None) and ratio is None:
         ratio = regime_ratio()
     dates = np.array(sorted(ch.date.unique()))
     by_date_full = {d: g for d, g in ch.groupby("date")}
@@ -176,10 +185,11 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
                     reason = "stop"
                 elif dte <= cfg.time_stop_dte:
                     reason = "time"
-                if (reason is None and cfg.regime_continuous and cfg.regime_thr is not None
-                        and ratio is not None):
+                _xthr = (cfg.regime_exit_thr if cfg.regime_exit_thr is not None
+                         else (cfg.regime_thr if cfg.regime_continuous else None))
+                if reason is None and _xthr is not None and ratio is not None:
                     rr = ratio.get(d)
-                    if rr is not None and np.isfinite(rr) and rr >= cfg.regime_thr:
+                    if rr is not None and np.isfinite(rr) and rr >= _xthr:
                         reason = "regime"
                 if dte <= 0:
                     if open_pos["cp"] == "P":
