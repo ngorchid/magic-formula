@@ -21,7 +21,8 @@ import numpy as np
 import pandas as pd
 
 from paper.state import HOLD_DAYS, PortfolioState, Position
-from risk_guard import MarginLimits, RiskLimits, check_order, liquidity_check, price_sane
+from risk_guard import (MarginLimits, RiskLimits, check_order, liquidity_check,
+                        price_sane, stale_columns)
 
 
 @dataclass
@@ -162,6 +163,34 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
         _hist = adj[_t].dropna()
         if len(_hist) >= 2:
             priors[_t] = float(_hist.iloc[-2])
+    # PER-TICKER STALENESS. `data_fresh` upstream inspects only the panel INDEX, so a single
+    # ticker whose feed dies or freezes leaves the panel looking current: `marks` still holds a
+    # valid-looking price, `price_sane` passes because the price is a perfectly good number, and
+    # sizing divides by it. The result is a real order at a price that no longer exists.
+    #
+    # BUYS ONLY. A stale name is excluded from new purchases; sells are deliberately untouched,
+    # in line with the framework-wide rule that no guard may block a close. Selling at a stale
+    # mark is imperfect, but refusing to sell traps the position — and the exit here is
+    # clock-driven with no deadline, so a delayed sell costs nothing while a blocked one holds
+    # risk we have decided to shed.
+    stale_px, _ = stale_columns(adj, pd.Timestamp(today),
+                                RiskLimits.for_equities(cfg.budget))
+    # SCOPE THE LOG, not the check. Only held names and the top of the ranking get a daily price
+    # refresh (`_refresh_marks`); the rest of the ~500-name panel is monthly-cached and is stale
+    # BY DESIGN. Flagging all of it warned on ~400 names we never trade — which is how an alert
+    # channel is trained to be ignored. The skip below still applies to every candidate, since a
+    # name outside the refresh set genuinely does have a month-old price.
+    _relevant = (set(ranking.head(max(cfg.hold_n, cfg.top_n)).index) | state.tickers)
+    _noisy = sorted(set(stale_px) & _relevant)
+    if _noisy:
+        logging.warning("stale prices on %d tradeable name(s): %s — excluded from BUYS "
+                        "(sells unaffected)", len(_noisy),
+                        ", ".join(f"{t} {stale_px[t]}d" for t in _noisy[:10])
+                        + (" ..." if len(_noisy) > 10 else ""))
+    _held_stale = sorted(set(stale_px) & state.tickers)
+    if _held_stale:
+        logging.warning("HELD positions marked on stale prices: %s — NAV is approximate",
+                        ", ".join(_held_stale))
     # Tilts are normalised over the names we actually INTEND to hold (the top_n ranking), not
     # the whole universe — otherwise the mean is set by names we will never buy.
     tilts = _normalised_tilts(vol.reindex(ranking.head(cfg.top_n).index).dropna(), cfg)
@@ -211,6 +240,9 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
             if n_buys <= 0:
                 break
             if t in held or t not in marks:
+                continue
+            if t in stale_px:
+                logging.info("skip %s — stale price (%dd since it last moved)", t, stale_px[t])
                 continue
             price_local = marks[t]
             f = fx.get(ccy.get(t, "USD"), 1.0)

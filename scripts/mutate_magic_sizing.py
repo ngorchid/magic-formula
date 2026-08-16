@@ -68,6 +68,14 @@ MUTATIONS = [
     ("    t = pd.Series(np.clip(ref / vol, *cfg.inv_vol_clip), index=vol.index).replace(",
      "    t = pd.Series(ref / vol, index=vol.index).replace(",
      "inverse-vol clip removed (one low-vol name can dominate)"),
+
+    # --- stale prices (wired 2026-08-16) ---
+    ("            if t in stale_px:",
+     "            if False:",
+     "stale-price skip removed (buys size off a frozen price)"),
+    ("    stale_px, _ = stale_columns(adj, pd.Timestamp(today),",
+     "    stale_px, _ = ({}, None) or stale_columns(adj, pd.Timestamp(today),",
+     "stale detection returns nothing (every name looks live)"),
 ]
 
 

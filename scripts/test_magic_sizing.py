@@ -281,6 +281,68 @@ expect("every order passed the real check_order guard",
                              RiskLimits.for_equities(nav_f), gross_notional=0.0).ok
                  for p in st.positions), ""))
 
+# =====================================================================================
+print("\n--- stale prices: excluded from BUYS, never blocking a SELL ---")
+print("    (data_fresh sees only the INDEX; one frozen ticker left the panel looking current)")
+
+
+class _StubBroker:
+    """Records orders. A stub is legitimate HERE because the broker is a collaborator, not the
+    thing under test — run_daily's stale handling is. Nothing about its behaviour is asserted."""
+
+    dry_run = True
+
+    def __init__(self):
+        self.orders = []
+
+    def order(self, ticker, action, shares, wait=20.0):
+        self.orders.append((action, ticker, shares))
+        return {"ok": True, "status": "dryrun", "fill_price": None}
+
+
+def _run(px, ranking, state, today="2026-08-17", **cfg_kw):
+    brk = _StubBroker()
+    panels = {"adj": px, "currency": {c: "USD" for c in px.columns}}
+    from paper.orchestrator import run_daily
+    # hold_n must be SMALL here: it is the no-trade band, and with the default 45 against a
+    # 7-name fixture every name stays in the band and the rotation never sells anything.
+    cfg = PaperConfig(max_new_buys_per_day=3, **cfg_kw)
+    run_daily(state, ranking, panels, {"USD": 1.0}, brk, cfg, today)
+    return brk.orders
+
+
+_idx = pd.bdate_range(end=pd.Timestamp("2026-08-17"), periods=400)
+_rng = np.random.default_rng(5)
+_names = [f"N{i}" for i in range(6)]
+_px = pd.DataFrame({n: 100 * np.exp(np.cumsum(_rng.standard_normal(len(_idx)) * 0.01))
+                    for n in _names}, index=_idx)
+_px["FROZEN"] = 50.0                                   # reports every day, never moves
+# FROZEN must rank FIRST. The buy loop walks `ranking.index` IN ORDER and stops at
+# max_new_buys_per_day, so a frozen name ranked last is never reached — with or without the
+# skip — and the case cannot fail. That is exactly how the first version of it survived both
+# stale mutations.
+_rank = pd.Series(range(len(_px.columns)),
+                  index=["FROZEN"] + _names, dtype=float)
+
+_orders = _run(_px, _rank, book(cash=100_000.0, holdings={}))
+_bought = {t for a, t, _ in _orders if a == "BUY"}
+print(f"    bought: {sorted(_bought)}")
+expect("a FROZEN-price name is not bought EVEN WHEN RANKED FIRST",
+       Check("FROZEN" not in _bought, f"{sorted(_bought)}"))
+expect("  ... while live names still are (not a blanket freeze)",
+       Check(len(_bought) > 0, f"{sorted(_bought)}"))
+
+# THE INVARIANT: a stale price must never block a SELL. Hold the frozen name past its clock
+# and out of the band, so the rotation wants it gone.
+_held = book(cash=10_000.0, holdings={"FROZEN": (10.0, 50.0)})
+_held.positions[0].entry_date = "2026-01-01"                     # clock long expired
+_rank_out = pd.Series(range(len(_px.columns)), index=_names + ["FROZEN"], dtype=float)
+_sells = [o for o in _run(_px, _rank_out, _held, hold_n=3, top_n=3) if o[0] == "SELL"]
+print(f"    sells: {_sells}")
+expect("INVARIANT: a stale price does NOT block the SELL of that position",
+       Check(any(t == "FROZEN" for _, t, _ in _sells), f"{_sells}"))
+
+
 print("\n" + "=" * 92)
 if fails:
     print(f"{len(fails)} FAILURE(S) of {ran}:")
