@@ -69,12 +69,14 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
       <tr><td>Strategy since inception</td><td>{_pct(total_ret)} &nbsp; vs SPY {_pct(spy_incep_ret)} &nbsp; (<b>{_pct(outperf)}</b> rel)</td></tr>
     </table>"""
 
+    label = os.getenv("BOOK_LABEL", "Paper")
+    caveat = "Paper trading — fills optimistic." if label.lower() == "paper" else "Live trading — real fills."
     return f"""<html><body style='font-family:sans-serif;color:#1e293b'>
-    <h2 style='color:#1a3c5e'>Magic Formula Paper — {today}</h2>
+    <h2 style='color:#1a3c5e'>Magic Formula {label} — {today}</h2>
     {summary}
     <h3 style='color:#1a3c5e'>Portfolio</h3>
     {port_tbl}
-    <p style='color:#64748b;font-size:11px;margin-top:14px'>US + Europe, ≥$500M, enhanced Magic Formula (Graham off, inverse-vol, 25% vol-target). Paper trading — fills optimistic.</p>
+    <p style='color:#64748b;font-size:11px;margin-top:14px'>US + Europe, ≥$500M, enhanced Magic Formula (Graham off, inverse-vol, 25% vol-target). {caveat}</p>
     </body></html>"""
 
 
@@ -93,7 +95,7 @@ def send_report(state: PortfolioState, marks: dict, fx: dict,
     mark = ""
     if alerts is not None and getattr(alerts, "worst", None):
         mark = f"[{alerts.worst} x{len(alerts.records)}] "
-    subject = f"{mark}Magic Formula Paper — {today}: NAV ${nav:,.0f} ({total_ret*100:+.1f}%)"
+    subject = f"{mark}Magic Formula {os.getenv('BOOK_LABEL', 'Paper')} — {today}: NAV ${nav:,.0f} ({total_ret*100:+.1f}%)"
 
     user, pw, to = os.getenv("EMAIL_USER"), os.getenv("EMAIL_PASS"), os.getenv("TO_EMAIL")
     if dry_run or not all([user, pw, to]):
