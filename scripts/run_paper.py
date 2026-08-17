@@ -142,7 +142,9 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         return
 
     cfg_mf = EnhancedMagicConfig(use_graham=False)
-    cfg = PaperConfig()
+    # BUDGET from env so a checkout sizes to its own capital (paper 100k default, live 50k via
+    # .env) without a code edit — matching how options-vrp/trend-overlay already read it.
+    cfg = PaperConfig(budget=float(os.getenv("BUDGET", "100000")))
     state = PortfolioState.load(STATE_FILE)
 
     # KILL SWITCH — FIRST, before the universe refresh. That pull takes ~13 minutes, so checking
