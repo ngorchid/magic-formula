@@ -232,6 +232,10 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         # disconnect(). State is what the strategy BELIEVES; when it is wrong, nothing inside the
         # strategy can tell. Report only, never auto-correct a shared account.
         if not dry_run:
+            # Let IB's portfolio feed catch up to fills just placed above. Without this the
+            # read races the just-filled order and reports it as a PHANTOM (state N vs broker 0)
+            # — a false alarm that lands in the LIVE email. Same feed-lag fix as trend-overlay.
+            broker.ib.sleep(3)
             _actual = broker.stock_positions()
             if _actual is None:
                 logging.warning("reconcile: IB positions unavailable — state NOT verified")
