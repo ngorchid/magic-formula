@@ -90,4 +90,8 @@ schtasks /Create /TN "MagicFormulaPaper" ^
   (~20 min, cached to `results\paper\`); other days are fast.
 - **Market data**: the "Error 162 / different IP" message is harmless — IB paper fills against
   the real market internally; the strategy never requests IB prices.
+- **Live audit tags**: whenever new code is promoted to the LIVE run, tag that commit
+  `live-YYYY-MM-DD` (annotated) and push it — `git tag -l "live-*"` then gives a timeline of
+  what code was live when, and `git show live-YYYY-MM-DD` recalls the deployment details.
+  First go-live: `live-2026-08-18` (acct U27760647, 50k).
 - Freeze the strategy while it runs (no parameter tweaks) to keep the OOS track record valid.
