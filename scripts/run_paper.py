@@ -30,7 +30,8 @@ from paper.broker import Broker, ib_contract_spec  # noqa: E402
 from paper.email_report import send_report  # noqa: E402
 from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
-from risk_guard import (install_alert_collector, missed_runs,  # noqa: E402
+from risk_guard import (code_version, install_alert_collector,  # noqa: E402
+                        missed_runs,
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
                         data_fresh, RiskLimits, write_equity, book_drawdown, book_vol,
@@ -150,6 +151,10 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # KILL SWITCH — FIRST, before the universe refresh. That pull takes ~13 minutes, so checking
     # afterwards would make a halted run do all the expensive work anyway, and would delay a
     # HALT_ALL exit by a quarter of an hour when the point is to stop promptly.
+    # Report WHICH COMMIT is running before anything else. Placed above the kill switch so it
+    # is recorded even on a halted run: "the box is running week-old code" is exactly the kind of
+    # thing you want to learn from a halted day's log, not discover a month later.
+    code_version(ROOT)
     _halt, _hwhy = halt_state(ROOT)
     if _halt == HALT_ALL:
         logging.error("HALTED (all): %s — exiting without trading", _hwhy)
