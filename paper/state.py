@@ -84,9 +84,16 @@ class PortfolioState:
         return [p for p in self.positions if p.clock_up(today, hold_days)]
 
     # ---- mutations ----
-    def ensure_inception(self, today: str) -> None:
+    def ensure_inception(self, today: str, budget: float | None = None) -> None:
         if self.inception_date is None:
             self.inception_date = today
+            # Fresh book: anchor starting capital to the configured budget. The dataclass
+            # defaults (100k) are only a fallback — a live checkout with BUDGET=50000 must
+            # start at 50k, not 100k, or every position is sized against a phantom 2x NAV.
+            # Guarded to a truly empty book so it never rewrites cash on an in-progress one.
+            if budget is not None and not self.positions and not self.nav_history:
+                self.inception_nav = budget
+                self.cash = budget
 
     def open_position(self, pos: Position) -> None:
         self.cash -= pos.cost_usd()

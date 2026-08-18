@@ -145,7 +145,7 @@ def _gross_scalar(vol: pd.Series, cfg: PaperConfig) -> float:
 def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
               broker, cfg: PaperConfig, today: str) -> dict:
     """Run one weekday. Mutates `state`. Returns a summary for the email."""
-    state.ensure_inception(today)
+    state.ensure_inception(today, cfg.budget)
     adj = panels["adj"]
     ccy = panels["currency"]
     vol = _annual_vol(adj, cfg.vol_window)

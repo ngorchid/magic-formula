@@ -142,7 +142,9 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         return
 
     cfg_mf = EnhancedMagicConfig(use_graham=False)
-    cfg = PaperConfig()
+    # BUDGET from env so a checkout sizes to its own capital (paper 100k default, live 50k via
+    # .env) without a code edit — matching how options-vrp/trend-overlay already read it.
+    cfg = PaperConfig(budget=float(os.getenv("BUDGET", "100000")))
     state = PortfolioState.load(STATE_FILE)
 
     # KILL SWITCH — FIRST, before the universe refresh. That pull takes ~13 minutes, so checking
@@ -230,6 +232,10 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         # disconnect(). State is what the strategy BELIEVES; when it is wrong, nothing inside the
         # strategy can tell. Report only, never auto-correct a shared account.
         if not dry_run:
+            # Let IB's portfolio feed catch up to fills just placed above. Without this the
+            # read races the just-filled order and reports it as a PHANTOM (state N vs broker 0)
+            # — a false alarm that lands in the LIVE email. Same feed-lag fix as trend-overlay.
+            broker.ib.sleep(3)
             _actual = broker.stock_positions()
             if _actual is None:
                 logging.warning("reconcile: IB positions unavailable — state NOT verified")
