@@ -283,8 +283,9 @@ def check_order(ticker: str, side: str, qty: float, price: float, multiplier: fl
     # A position-REDUCING order (one that does not increase |exposure|) must NEVER be blocked by a
     # size cap. A guard that blocks closes can trap a position it earlier allowed — after a budget
     # cut, a rule change, or a position bought before the guard existed — leaving no way to close or
-    # roll it. Only exposure-GROWING orders are size-capped. (Forced/delivery closes are already
-    # exempt a level up in the callers; this also covers ordinary reduces.)
+    # roll it (exactly what happened to the full-size treasuries). Only exposure-GROWING orders are
+    # size-capped. (Forced/delivery closes are already exempt a level up in the callers -- in
+    # trend via the RollOrder `safety` flag; this also covers ordinary reduces and roll-outs.)
     grows = after > abs(current_position_notional) + 1e-6
     if grows:
         # "deferrable" separates a reject caused by the INSTRUMENT being too big for the CURRENT
