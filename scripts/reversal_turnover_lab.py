@@ -42,7 +42,7 @@ from data.universe import (sp1500_constituents, sp1500_sectors,  # noqa: E402
                            sp1500_tickers)
 from strategies.equity_mn.neutralize import rolling_beta  # noqa: E402
 from reversal_lab import Variant, build_weights           # noqa: E402
-from reversal_fees_lab import concentrate, evaluate       # noqa: E402
+from reversal_fees_lab import concentrate                 # noqa: E402
 
 
 def main() -> None:
@@ -79,22 +79,71 @@ def main() -> None:
         ("slow horizons (5,10)", dict(smooth=2, horizons=(5, 10))),
         ("slow horizons + band 1.0", dict(smooth=2, horizons=(5, 10), band=1.0)),
         ("very slow (10,21)", dict(smooth=5, horizons=(10, 21), band=1.0)),
+        # --- PERIODIC REBALANCE: trade on 1 day in k, nothing on the others ---
+        ("REBAL every 2d", dict(smooth=2, rebal_k=2)),
+        ("REBAL every 3d", dict(smooth=2, rebal_k=3)),
+        ("REBAL weekly (5d)", dict(smooth=2, rebal_k=5)),
+        ("REBAL weekly, slow (5,10)", dict(smooth=2, horizons=(5, 10), rebal_k=5)),
+        ("REBAL weekly, slow+band", dict(smooth=2, horizons=(5, 10), band=1.0, rebal_k=5)),
+        ("REBAL every 10d, slow (10,21)", dict(smooth=2, horizons=(10, 21), rebal_k=10)),
+        ("REBAL monthly (21d), (10,21)", dict(smooth=2, horizons=(10, 21), rebal_k=21)),
     ]
+
+    # PERIODIC REBALANCE — the thing the variants above do NOT test. They all re-target every
+    # day; a slower SIGNAL still moves a little daily, and any move past the band is an order,
+    # which is why order count barely fell. Rebalancing every k days places ZERO orders on the
+    # other k-1 days, so order count falls by construction rather than by hoping the target
+    # sits still.
+    # NB weights are held FIXED between rebalances rather than drifting with prices. Over a
+    # 5-10 day hold the difference is small, but it flatters neutrality slightly.
+    def evaluate_periodic(w, prices, volume, budget, k, spread_bps=1.5):
+        """Cost and return when SHARES are held fixed between rebalances.
+
+        ⚠ The shared `evaluate()` cannot be used for this. It derives shares as
+        weight x budget / price and diffs THAT — so a drifting price changes the implied share
+        count every day even when the target weight is frozen, producing a phantom order daily.
+        It models continuous rebalancing-to-weight, which is exactly what a periodic-rebalance
+        test must not do. Reported 162 orders/day for a MONTHLY rebalance before this was fixed.
+
+        Here shares are set on rebalance days and CARRIED. Between rebalances the position value
+        drifts with price (as it must), P&L is shares x price change, and there are genuinely
+        zero orders.
+        """
+        px = prices.reindex_like(w).ffill()
+        rebal = pd.Series(False, index=w.index)
+        rebal.iloc[::k] = True
+        tgt = (w * budget).div(px).round().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        shares = tgt.where(rebal, np.nan).ffill().fillna(0.0)      # set, then CARRY
+        traded = (shares - shares.shift(1)).abs().fillna(shares.abs())
+        # P&L from holding those shares, as a fraction of budget.
+        pnl = (shares.shift(1) * px.diff()).sum(axis=1) / budget
+        notional = traded * px
+        adv = (prices * volume).rolling(21).mean().reindex_like(w).ffill()
+        adv = adv.fillna(adv.median().median())
+        from backtest import LinearCostModel
+        pct = LinearCostModel(spread_bps, 10.0).charge(notional, adv) / budget
+        per = np.minimum(0.005 * traded, 0.01 * notional)
+        per = per.where(traded > 0, 0.0).clip(lower=0.0)
+        per = per.mask((traded > 0) & (per < 1.0), 1.0)
+        ib = per.sum(axis=1) / budget
+        orders = (traded > 0).sum(axis=1)
+        turn = float((notional.sum(axis=1) / budget).mean() * 252)
+        return pnl, pnl - pct - ib, float(orders.mean()), float(ib.mean() * 252), turn
 
     rows = []
     for label, kw in variants:
         cfg = {**BASE, **kw}
+        k = cfg.pop("rebal_k", 1)
         w = build_weights(Variant(label, **cfg), prices, vol, bt, sc, iv, vix)
-        held = concentrate(w, 100, 100)                  # hold breadth fixed; vary only SPEED
+        held = concentrate(w, 100, 100)                  # breadth fixed; vary SPEED and CADENCE
         common = held.replace(0.0, np.nan).dropna(how="all").index
         held = held.reindex(common).fillna(0.0)
-        # Annualised two-way turnover, as a multiple of gross book value.
-        turn = float(held.diff().abs().sum(axis=1).mean() * 252)
-        out = {"label": label, "turnover": turn}
+        out = {"label": label}
         for budget, tag in ((1_000_000.0, "1M"), (100_000.0, "100k")):
-            g, pct, flat, ib, ordd, f_yr, ib_yr = evaluate(held, prices, vol, budget)
+            g, net, ordd, ib_yr, turn = evaluate_periodic(held, prices, vol, budget, k)
+            out["turnover"] = turn
             out[f"gross_{tag}"] = summary_stats(g.fillna(0.0))["sharpe"]
-            out[f"net_{tag}"] = summary_stats(ib.fillna(0.0))["sharpe"]
+            out[f"net_{tag}"] = summary_stats(net.fillna(0.0))["sharpe"]
             out[f"ibyr_{tag}"] = ib_yr
             out[f"ord_{tag}"] = ordd
         rows.append(out)
