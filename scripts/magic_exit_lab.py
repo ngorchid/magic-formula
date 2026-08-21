@@ -103,26 +103,38 @@ def main() -> None:
     print(f"FORWARD EXCESS RETURN OF A DROPPED NAME vs THE BOOK — {label}, band {cfg.hold_n}")
     print("=" * 92)
     print(f"  {'why it dropped':30}{'n':>7}" + "".join(f"{'ex' + str(h) + 'd':>12}" for h in HORIZONS)
-          + f"{'t(252d)':>10}")
+          + f"{'t by-date':>10}{'t annual':>10}")
     print("  " + "-" * 88)
     order = ["EY fell only (price)", "ROC fell only (business)", "both fell", "neither fell much"]
     for b in order:
         g = ev[ev["bucket"] == b]
         if g.empty:
             continue
-        s = g["ex252"].dropna()
-        t = s.mean() / s.std() * np.sqrt(len(s)) if len(s) > 2 and s.std() else np.nan
+        # CLUSTERED BY DATE, not by event. The naive event-level t treats 617 drops as 617
+        # independent draws; they sit on 155 dates (same-date drops share a book return) with
+        # 252-day windows that overlap heavily -- over 13.4 years there are only ~13 truly
+        # independent annual windows. The naive t roughly DOUBLES every number here.
+        bd = g.groupby("date")["ex252"].mean().dropna()
+        t = bd.mean() / bd.std() * np.sqrt(len(bd)) if len(bd) > 2 and bd.std() else np.nan
+        yr = g.groupby(g["date"].dt.year)["ex252"].mean().dropna()
+        ty = yr.mean() / yr.std() * np.sqrt(len(yr)) if len(yr) > 2 and yr.std() else np.nan
         print(f"  {b:30}{len(g):>7,}" + "".join(f"{g['ex' + str(h)].mean():>+12.2%}" for h in HORIZONS)
-              + f"{t:>+10.1f}")
-    allr = ev["ex252"].dropna()
+              + f"{t:>+10.1f}{ty:>+10.1f}")
+    _bd = ev.groupby("date")["ex252"].mean().dropna()
+    _yr = ev.groupby(ev["date"].dt.year)["ex252"].mean().dropna()
     print(f"  {'ALL drops':30}{len(ev):>7,}"
           + "".join(f"{ev['ex' + str(h)].mean():>+12.2%}" for h in HORIZONS)
-          + f"{allr.mean() / allr.std() * np.sqrt(len(allr)):>+10.1f}")
+          + f"{_bd.mean() / _bd.std() * np.sqrt(len(_bd)):>+10.1f}"
+          + f"{_yr.mean() / _yr.std() * np.sqrt(len(_yr)):>+10.1f}")
+    print("\n  ⚠ NOTHING in this table is significant once clustering is respected. The point")
+    print("     estimates are suggestive; the evidence is not there. Do not act on a row alone.")
 
     a = ev[ev["bucket"] == "EY fell only (price)"]["ex252"].dropna()
     b_ = ev[ev["bucket"] == "ROC fell only (business)"]["ex252"].dropna()
     if len(a) > 2 and len(b_) > 2:
         diff = a.mean() - b_.mean()
+        # NB still event-level and so still OPTIMISTIC; it was insignificant even before
+        # clustering, which is why it is left as the weaker test rather than sharpened.
         se = np.sqrt(a.var() / len(a) + b_.var() / len(b_))
         print(f"\n  PRICE-driven minus BUSINESS-driven, 252d: {diff:+.2%}  "
               f"(t = {diff / se:+.1f} on n={len(a):,} vs {len(b_):,})")
