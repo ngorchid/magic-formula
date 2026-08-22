@@ -1,4 +1,4 @@
-"""Is d_ROC a NEW factor, or is fcf_growth already carrying it?
+"""Are the component CHANGES (d_ROC, d_EY) new factors, or already in the model?
 
 d_ROC (change in the return-on-capital percentile rank) was the one factor signal to survive its
 own robustness check: universe-wide IC +0.0180, t=+1.7, and monotone, so unlike the XOR pattern it
@@ -115,6 +115,23 @@ def main() -> None:
     m_a, t_a = report("d_ROC residualised on fcf_growth", ic_series(residualise(d_roc, fcfg), fwd, base))
     m_b, t_b = report("d_ROC residualised on the LIVE RANK  <- decisive",
                       ic_series(residualise(d_roc, rk(live_rank)), fwd, base))
+
+    # d_EY, the second candidate: "stocks that fell over the past year are attractive now".
+    # The DIRECTION is right (quintiles of d_EY run +10.7 .. +12.4% monotonically) but the
+    # overlap is not where it was expected. Residualising on 252d momentum changes nothing --
+    # it is NOT a momentum conflict -- while corr(d_EY, the EY LEVEL) is +0.41: a stock whose
+    # cheapness rank ROSE now IS cheap, and the level is already the model's first factor.
+    # Measuring the change is a noisier route to information the level already carries.
+    ey = rk(fcf_ev_yield(f, mcap))
+    d_ey = ey - ey.shift(LOOK)
+    mom = rk(residual_momentum(adj, lookback=cfg.momentum_lookback, skip=cfg.momentum_skip))
+    print()
+    report("d_EY standalone", ic_series(d_ey, fwd, base))
+    report("d_EY residualised on 252d momentum", ic_series(residualise(d_ey, mom), fwd, base))
+    report("d_EY residualised on the LIVE RANK  <- decisive",
+           ic_series(residualise(d_ey, rk(live_rank)), fwd, base))
+    print(f"  {'corr(d_EY, EY LEVEL)':44}    {d_ey.corrwith(ey, axis=1).mean():+.3f}"
+          f"   <- the real overlap")
 
     print("\n" + "=" * 92)
     print("3. PORTFOLIO TEST — add d_ROC as a 4th family (equal weight with the other three)")
