@@ -24,6 +24,21 @@ selection (top 30, band 45) so ONLY the weighting differs:
   kelly-diag      w ~ z / sigma^2, diagonal covariance     (the actual Kelly form)
   half-kelly      50/50 blend of kelly-diag and equal      (the standard prudence discount)
 
+SIZING IS NOT SELECTION, and the distinction matters. Adding d_EY to the RANK changes which
+names get picked and costs 0.12 Sharpe, because it duplicates the value LEVEL (corr 0.41) and
+distorts the screen. Using it only to SIZE the already-selected 30 leaves selection untouched.
+Tested separately (see `d_ey_sizing` below): +1.00 vs +0.98, positive in BOTH halves, and the
+INVERSE tilt is worse (+0.95) so the sign is real.
+
+⚠ I PREDICTED THE OPPOSITE and was wrong. d_EY residualised on the live rank has IC -0.0361
+universe-wide, and I inferred that sizing within the top 30 -- which conditions on rank -- would
+therefore hurt. It does not. A universe-wide residual does not describe behaviour inside a
+heavily selected subsample; those are different conditionings.
+
+⚠ AND IT IS STILL NOT DEPLOYABLE. +0.02 against a Sharpe SE of 0.27, and it is the best of
+~40 variants tested across this research thread. One small consistent positive out of forty is
+roughly what noise produces. "Not distinguishable from equal weight" is the honest reading.
+
 ⚠ CONCENTRATION IS THE REAL RISK, not return. A tilt that helps on average can put 8% of the
 book in one name, so max weight is reported alongside Sharpe. A +0.03 Sharpe bought with double
 the single-name concentration is not obviously a good trade.
@@ -44,6 +59,7 @@ sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "scripts"))
 warnings.filterwarnings("ignore")
 
 from backtest import summary_stats                          # noqa: E402
+from signals.quality import fcf_ev_yield                    # noqa: E402
 from strategies.magic_formula import (EnhancedMagicConfig,   # noqa: E402
                                       enhanced_rank)
 from strategies.magic_formula.construct import (_rebal_dates,  # noqa: E402
@@ -54,7 +70,7 @@ SPLIT = "2019-07-01"
 CAP = 0.10          # no single name above this, whatever the scheme says
 
 
-def build(rank, adj, vol, top_n, hold_n, scheme):
+def build(rank, adj, vol, top_n, hold_n, scheme, D_EY=None):
     """weights_banded, but the weighting of the HELD set is pluggable. Selection is identical
     across schemes, so any difference is attributable to sizing alone."""
     cal = adj.index
@@ -75,7 +91,13 @@ def build(rank, adj, vol, top_n, hold_n, scheme):
         p = pos[held].astype(float)                       # 0 = best
         sd = vol.loc[dt, held] if vol is not None else pd.Series(1.0, index=held)
         sd = sd.where(sd > 0).fillna(sd.median() if sd.notna().any() else 1.0)
-        if scheme == "equal":
+        if scheme.startswith("d_ey_sizing"):
+            # SELECTION UNCHANGED -- only the weighting of the chosen 30 uses d_EY.
+            v = D_EY.loc[dt, held] * (-1.0 if scheme.endswith("inverse") else 1.0)
+            v = v.fillna(v.median() if v.notna().any() else 0.0)
+            zz = (v - v.mean()) / (v.std() if v.std() else 1.0)
+            raw = zz - zz.min() + 0.25
+        elif scheme == "equal":
             raw = pd.Series(1.0, index=held)
         elif scheme == "inverse_vol":
             raw = 1.0 / sd
@@ -111,8 +133,11 @@ def main() -> None:
     vol = adj.pct_change(fill_method=None).rolling(cfg.vol_window).std()
 
     rows = []
-    for scheme in ("equal", "inverse_vol", "rank_linear", "rank_z", "kelly_diag", "half_kelly"):
-        w = build(rank, adj, vol, cfg.top_n, cfg.hold_n, scheme)
+    ey = fcf_ev_yield(f, mcap).reindex_like(adj).rank(axis=1, pct=True)
+    D_EY = ey - ey.shift(252)
+    for scheme in ("equal", "inverse_vol", "rank_linear", "rank_z", "kelly_diag", "half_kelly",
+                   "d_ey_sizing", "d_ey_sizing_inverse"):
+        w = build(rank, adj, vol, cfg.top_n, cfg.hold_n, scheme, D_EY)
         net, turn = pnl(w, adj, volume, close)
         idx = net.replace(0.0, np.nan).dropna().index
         net = net.reindex(idx).fillna(0.0)
