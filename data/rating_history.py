@@ -382,6 +382,47 @@ def map_to_tickers(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return out
 
 
+_WITHDRAWN = {"WD", "WE", "WO"}
+_NO_RATING = -999.0  # sentinel: a withdrawal must STOP the forward fill, not be skipped
+
+
+def rating_panel(df: pd.DataFrame, calendar: pd.DatetimeIndex,
+                 tickers: list[str]) -> pd.DataFrame:
+    """(date x ticker) prevailing rating notch, forward-filled from rating actions.
+
+    Point-in-time by construction: the value at t is the rating publicly in force at t,
+    since rating actions are public the day they occur. Unlike the downgrade-event
+    flags, this covers every rated holding on every date rather than a rare window.
+
+    Withdrawals are handled explicitly. A plain ffill over the rated rows would carry a
+    stale rating forever after the agency stopped covering the name, so WD/WE/WO writes
+    a sentinel that terminates the fill and leaves NaN until a new rating appears.
+
+    Where a parent and its financing subsidiary both map to one ticker (Ford Motor
+    Company / Ford Motor Credit), the median notch is taken.
+    """
+    er = df if "series" in df.columns else entity_ratings(df)
+    ev = map_to_tickers(er, tickers).dropna(subset=["ticker", "action_date"])
+    ev = ev[ev["notch"].notna() | ev["action"].isin(_WITHDRAWN)].copy()
+    ev["value"] = ev["notch"].where(~ev["action"].isin(_WITHDRAWN), _NO_RATING)
+    ev["obligor_key"] = ev["lei"].fillna(ev["obligor"])
+
+    # Build PER-OBLIGOR series first. Collapsing to the ticker before the fill would
+    # average the withdrawal sentinel against a live rating -- median([-999, 14]) is
+    # -492.5, which is neither withdrawn nor a valid notch, and survives the != check.
+    # Within one obligor on one date, max() lets a same-day re-rating beat the
+    # withdrawal it replaces (Moody's books both legs of a relabel on the same day).
+    per = (ev.groupby(["action_date", "obligor_key"])["value"]
+             .max().unstack("obligor_key").sort_index())
+    per = per.reindex(per.index.union(calendar)).ffill().reindex(calendar)
+    per = per.where(per != _NO_RATING)   # sentinel -> no rating, AFTER the fill
+
+    key_to_ticker = ev.drop_duplicates("obligor_key").set_index("obligor_key")["ticker"]
+    per.columns = [key_to_ticker.get(c) for c in per.columns]
+    panel = per.T.groupby(level=0).median().T
+    return panel.reindex(columns=sorted(set(tickers)))
+
+
 def rated_tickers(df: pd.DataFrame, tickers: list[str]) -> list[str]:
     """Universe members this agency actually rates.
 
@@ -532,6 +573,23 @@ def _selftest() -> None:
            normalise_company("American International Group, Inc.")
     assert normalise_company("Cooper Companies, Inc.") != normalise_company("Cooper Industries plc")
     print("normalise_company       OK  (discriminative words preserved)")
+
+    # rating_panel: forward-fill, and a withdrawal must terminate the fill.
+    rows = parse_instance(io.BytesIO(_FIXTURE.encode()), source="inline")
+    fx = pd.DataFrame(rows)
+    fx["action_date"] = pd.to_datetime(fx["action_date"])
+    cal = pd.date_range("2018-01-01", "2022-01-01", freq="D")
+    panel = rating_panel(entity_ratings(fx), cal, ["F"])   # fixture CIK 37996 -> F
+    assert pd.isna(panel.loc["2018-06-01", "F"]), "no rating before the first action"
+    assert panel.loc["2019-06-01", "F"] == 12, "should hold BBB- (12)"
+    assert panel.loc["2020-04-01", "F"] == 11, "should hold BB+ (11) after the downgrade"
+    assert panel.loc["2020-10-01", "F"] == 10, "should hold BB (10)"
+    assert panel.loc["2021-09-01", "F"] == 11, "should hold BB+ (11) after the upgrade"
+    # Invariant: every value is a real notch or NaN. Guards the sentinel-averaging bug
+    # where a withdrawn parent and a live subsidiary produced median([-999, n]).
+    vals = panel.values[~pd.isna(panel.values)]
+    assert ((vals >= 0) & (vals <= 21)).all(), f"sentinel leaked into panel: {vals.min()}"
+    print("rating_panel            OK  (PIT ffill, withdrawal-aware, no sentinel leak)")
 
     # Streaming parse must not depend on zip packaging.
     rows = parse_instance(io.BytesIO(_FIXTURE.encode()), source="inline")
