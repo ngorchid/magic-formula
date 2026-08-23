@@ -52,18 +52,13 @@ FUTURES: list[FutureSpec] = [
     FutureSpec("oil",       "USO", "CL", "NYMEX", "USD", 1000,  70_000,  "MCL", 100,  7_000,  notice_buffer_days=14),
     FutureSpec("fx_eur",    "FXE", "6E", "CME",   "USD", 125000,135_000, "M6E", 12500,13_500, notice_buffer_days=10),
     FutureSpec("fx_aud",    "FXA", "6A", "CME",   "USD", 100000,66_000,  "M6A", 10000, 6_600,  notice_buffer_days=10),
-    # JPY added 2026-08-23. NOT "more FX": measured weekly, yen's closest neighbour is
-    # rates (IEF +0.51), not the currencies already held (FXE +0.38, FXA +0.28), and it
-    # is the only FX in the basket that RISES in equity stress — worst-decile SPY weeks
-    # give FXY +0.23%/wk against FXA -1.28%. So it partly offsets AUD's risk-on exposure
-    # rather than duplicating it. Overlay Sharpe 0.55 -> 0.65, maxDD -21.4% -> -18.5%
-    # (paired t=+1.40, i.e. NOT significant — added on the structural argument, which is
-    # defensible because the marginal cost of one more contract is ~0).
-    # ⚠ Micro is MJY, breaking the M6x pattern of the other CME FX micros. The standard
-    # 6J is ~$83k, against a per-market budget of ~$26-79k at N=8 on a $200k book, so it
-    # would round to 0 or 1 contract — the micro is effectively required at this size.
-    FutureSpec("fx_jpy",    "FXY", "6J", "CME",   "USD", 12_500_000, 83_000,
-               "MJY", 1_250_000, 8_300, notice_buffer_days=10),
+    # "10-correlated" expansion (added 2026-07-14): 30y bond / silver / yen. Diversify the
+    # existing rates/metals/FX sleeves; specs verified vs CME. NB sizing rounds to whole
+    # contracts — at BUDGET=100k these only take a position as OVERLAY_MULT scales toward 1.0
+    # (and ZB has NO micro at ~$115k/contract, so it needs a larger budget than the micros).
+    FutureSpec("rates_30y", "TLT", "ZB", "CBOT",  "USD", 1000,   115_000, notice_buffer_days=25),                 # phys. delivered; no micro
+    FutureSpec("silver",    "SLV", "SI", "COMEX", "USD", 5000,   175_000, "SI",  1000,    35_000, notice_buffer_days=30),  # 1,000oz micro shares the "SI" symbol; the MULTIPLIER (1000 vs full 5000) selects it — localSymbol SILQ6, tradingClass SIL. phys. delivered
+    FutureSpec("fx_jpy",    "FXY", "6J", "CME",   "USD", 12500000, 82_000, "MJY", 1250000, 8_200, notice_buffer_days=10),   # MJY = 1/10 micro (IB symbol; "M6J" does not resolve — Error 200)
 ]
 
 BY_MARKET: dict[str, FutureSpec] = {s.market: s for s in FUTURES}
