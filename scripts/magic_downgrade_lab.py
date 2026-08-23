@@ -142,6 +142,35 @@ def overlap_report(weights: pd.DataFrame, events: pd.DataFrame, months: int) -> 
             "events_needed_10pct": int(np.ceil((2 * PAIR_VOL / 0.10) ** 2))}
 
 
+def selection_check(weights: pd.DataFrame, events: pd.DataFrame, rated: list[str]) -> None:
+    """Does the strategy SELECT downgrade-prone names, independent of timing?
+
+    Distinct from the overlap check. Overlap asks how often the screen binds; this asks
+    whether the value tilt loads on credit deterioration at all. Both groups are drawn
+    from the same agency-rated pool, so ratings coverage cannot drive the difference.
+    """
+    held = set(weights.columns[(weights.abs() > 1e-12).any()])
+    downgraded = set(events["ticker"].unique())
+    rated_set = set(rated)
+    a, b = len(held & downgraded), len(held)
+    c, d = len(rated_set & downgraded), len(rated_set)
+    print("\n" + "=" * 78)
+    print("SELECTION CHECK — does the strategy pick downgrade-prone names?")
+    print("=" * 78)
+    print(f"  rated universe  {c:4d} of {d:4d} ever downgraded  = {c/d:.1%}")
+    print(f"  names ever held {a:4d} of {b:4d} ever downgraded  = {a/b:.1%}")
+    try:
+        from scipy.stats import fisher_exact
+        odds, p = fisher_exact([[a, b - a], [c - a, (d - c) - (b - a)]])
+        print(f"  Fisher exact p = {p:.4f}   odds ratio {odds:.2f}")
+        if p < 0.01 and odds > 1:
+            print("  -> The value tilt DOES load on credit deterioration. The screen's")
+            print("     failure is one of TIMING, not of premise: the strategy holds these")
+            print("     names mostly outside the post-downgrade window.")
+    except ImportError:
+        print("  (scipy not installed — skipping significance test)")
+
+
 def run_arm(f, mcap, adj, volume, close, elig, cfg) -> tuple[pd.Series, float, pd.DataFrame]:
     weights, _ = enhanced_weights(f, mcap, adj, elig, cfg)
     net, turnover = pnl(weights, adj, volume, close)
@@ -155,11 +184,17 @@ def show(label: str, net: pd.Series, turnover: float, idx: pd.DatetimeIndex) -> 
     return s
 
 
-def main(overlap_only: bool = False, bucket: str = "all") -> None:
+def main(overlap_only: bool = False, bucket: str = "all", universe_name: str = "sp500_pit") -> None:
     ratings = load_ratings()
     cfg = EnhancedMagicConfig()
-    print(f"[load] sp500_pit …")
-    adj, close, volume, spy, base, mcap, f, label = _load("sp500_pit", cfg, START,
+    if universe_name != "sp500_pit":
+        print("  !! SURVIVORSHIP WARNING: sp1500 is CURRENT constituents. The missing")
+        print("     names are those downgraded and then delisted/bankrupt — i.e. the")
+        print("     worst of the treatment group. The bias pushes AGAINST finding that")
+        print("     the screen helps, so a significant benefit here would be credible,")
+        print("     but a null or negative result is uninformative.\n")
+    print(f"[load] {universe_name} / {bucket} …")
+    adj, close, volume, spy, base, mcap, f, label = _load(universe_name, cfg, START,
                                                           END or pd.Timestamp.today().strftime("%Y-%m-%d"))
     elig_all = base if bucket == "all" else size_bucket(mcap, base, 0.0, 1 / 3)
     universe = sorted(adj.columns)
@@ -179,6 +214,7 @@ def main(overlap_only: bool = False, bucket: str = "all") -> None:
     # Power check uses the RATED baseline's own holdings.
     _, _, w_rated = run_arm(f, mcap, adj, volume, close, elig_rated, cfg)
     stats = overlap_report(w_rated, events, months=12)
+    selection_check(w_rated, events, rated)
 
     if stats["events_hit"] < stats["events_needed_10pct"]:
         print(f"\n  *** UNDERPOWERED: {stats['events_hit']} usable events against the "
@@ -250,10 +286,14 @@ def main(overlap_only: bool = False, bucket: str = "all") -> None:
 
     out = ROOT / "results" / "downgrade_screen"
     out.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(results).T.to_csv(out / "summary.csv")
-    events.to_csv(out / "downgrade_events.csv", index=False)
-    print(f"\n  wrote {out}/summary.csv and downgrade_events.csv")
+    tag = f"{universe_name}_{bucket}"
+    pd.DataFrame(results).T.to_csv(out / f"summary_{tag}.csv")
+    events.to_csv(out / f"downgrade_events_{tag}.csv", index=False)
+    print(f"\n  wrote {out}/summary_{tag}.csv and downgrade_events_{tag}.csv")
 
 
 if __name__ == "__main__":
-    main(overlap_only="--overlap-only" in sys.argv)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    main(overlap_only="--overlap-only" in sys.argv,
+         universe_name=args[0] if args else "sp500_pit",
+         bucket=args[1] if len(args) > 1 else "all")
