@@ -70,6 +70,13 @@ class Config:
     # rule requires it to be separable from entry, which `regime_continuous` was not: it demanded
     # regime_thr, which also gates entry, so the two effects could not be told apart.
     regime_exit_thr: float | None = None
+    # Fraction of the position CLOSED when the exit rule fires. 1.0 = close it (default and
+    # historical behaviour); 0.5 = halve and keep running. Added 2026-08-24: the "reduce 50%"
+    # variant was quoted as Sharpe +0.70 in commit 68aa42e but was an AD-HOC run -- the option
+    # was never in the committed code, so its P&L and drawdown could not be reproduced.
+    # Partial closes stay ONE P&L observation per POSITION (the legs are summed) so the trade
+    # count, and therefore the sqrt(n/yrs) Sharpe annualisation, stays comparable across arms.
+    regime_exit_frac: float = 1.0
     cp: str = "P"                   # "P" = bull put spread (default), "C" = bear call spread
 
     @property
@@ -197,14 +204,28 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
                     else:
                         val = max(0.0, S - open_pos["ks"]) - max(0.0, S - open_pos["kl"])
                     reason = "expiry"
+                # PARTIAL regime reduction: realise `frac`, keep the rest running.
+                if (reason == "regime" and 0.0 < cfg.regime_exit_frac < 1.0
+                        and open_pos["size"] > cfg.regime_exit_frac):
+                    f = cfg.regime_exit_frac
+                    open_pos["realised"] += ((open_pos["credit"] - val) * 100 * f
+                                             - 4 * cfg.cost_pts * 100 * f)
+                    open_pos["size"] -= f
+                    open_pos["reduced"] = True
+                    reason = None          # position stays open at reduced size
+
                 if reason:
-                    pnl = (open_pos["credit"] - val) * 100 - 4 * cfg.cost_pts * 100
+                    sz = open_pos["size"]
+                    pnl = (open_pos["realised"]
+                           + (open_pos["credit"] - val) * 100 * sz
+                           - 4 * cfg.cost_pts * 100 * sz)
                     trades.append({**{k: open_pos[k] for k in
                                       ("entry_date", "exp", "ks", "kl", "credit", "peak",
                                        "ds", "dl", "vrp", "cp")},
                                    "exit_date": d, "exit_val": val, "reason": reason,
                                    "pnl": pnl,
-                                   "peak_mult": open_pos["peak"] / open_pos["credit"]})
+                                   "peak_mult": open_pos["peak"] / open_pos["credit"],
+                                   "reduced": open_pos.get("reduced", False)})
                     open_pos = None
 
         if open_pos is None:
@@ -225,7 +246,8 @@ def run(cfg: Config, ch: pd.DataFrame, spot: pd.Series, vrp: pd.Series,
             open_pos = {"entry_date": d, "exp": exp, "ks": s.strike, "kl": l.strike,
                         "cs": s.contract, "cl": l.contract, "credit": credit,
                         "iv_s": s.iv, "iv_l": l.iv, "peak": credit * 0.0,
-                        "ds": s.delta, "dl": l.delta, "vrp": v, "cp": cfg.cp}
+                        "ds": s.delta, "dl": l.delta, "vrp": v, "cp": cfg.cp,
+                        "size": 1.0, "realised": 0.0, "reduced": False}
     return pd.DataFrame(trades)
 
 
