@@ -39,7 +39,14 @@ from run_best_magic import _load
 
 CAP = 0.10
 SPLIT = "2019-07-01"
-LIVE_CLIP = (0.5, 2.0)
+LIVE_CLIP = (0.5, 2.0)       # as deployed in paper/orchestrator.py
+TIGHT_CLIP = (0.7, 1.5)      # candidate: less deviation -> less turnover -> less fixed-fee drag
+TILT_BAND = 0.20             # tilt_band: only refresh a stored tilt if it moves >20% relatively
+
+
+def _raw_tilt(sd: pd.Series, clip) -> pd.Series:
+    ref = float(np.nanmedian(sd.values))
+    return pd.Series(np.clip(ref / sd, *clip), index=sd.index).fillna(1.0)
 
 
 def build(rank, adj, vol, top_n, hold_n, scheme):
@@ -47,6 +54,10 @@ def build(rank, adj, vol, top_n, hold_n, scheme):
     cal = adj.index
     target = pd.DataFrame(np.nan, index=cal, columns=adj.columns)
     held: list[str] = []
+    # Persistent per-name tilt for the entry/band variants. The whole point of those two is
+    # that a stored tilt does NOT move when a name's 63d vol wobbles, so the monthly
+    # re-estimation churn (measured at 0.92x/yr of pure drift turnover) never happens.
+    tilt_state: dict[str, float] = {}
     for dt in _rebal_dates(cal, "ME"):
         row = rank.loc[dt].dropna()
         if len(row) < top_n:
@@ -65,9 +76,28 @@ def build(rank, adj, vol, top_n, hold_n, scheme):
             raw = pd.Series(1.0, index=held)
         elif scheme == "inverse_vol_unbounded":       # what the original lab tested
             raw = 1.0 / sd
-        elif scheme == "live_tilt":                   # what paper/orchestrator.py does
+        elif scheme in ("tilt_entry", "tilt_band"):
+            # tilt_entry: fix each name's tilt when it ENTERS; never update it.
+            # tilt_band : refresh a stored tilt only when it has moved >TILT_BAND relatively.
+            fresh = _raw_tilt(sd, LIVE_CLIP)
+            for t in held:
+                if t not in tilt_state:
+                    tilt_state[t] = float(fresh[t])          # first sight -> set at entry
+                elif scheme == "tilt_band":
+                    old = tilt_state[t]
+                    if old > 0 and abs(float(fresh[t]) / old - 1.0) > TILT_BAND:
+                        tilt_state[t] = float(fresh[t])      # moved enough to be worth trading
+            for t in list(tilt_state):                       # drop names no longer held
+                if t not in held:
+                    del tilt_state[t]
+            t_ser = pd.Series({t: tilt_state[t] for t in held})
+            raw = t_ser / float(np.nanmean(t_ser.values))
+        elif scheme in ("live_tilt", "tilt_tight"):
+            # live_tilt  = what paper/orchestrator.py does today, clip (0.5, 2.0)
+            # tilt_tight = candidate, clip (0.7, 1.5); same shape, less deviation
+            clip = LIVE_CLIP if scheme == "live_tilt" else TIGHT_CLIP
             ref = float(np.nanmedian(sd.values))
-            t = pd.Series(np.clip(ref / sd, *LIVE_CLIP), index=held).fillna(1.0)
+            t = pd.Series(np.clip(ref / sd, *clip), index=held).fillna(1.0)
             raw = t / float(np.nanmean(t.values))     # normalise to mean exactly 1
         else:
             raise ValueError(scheme)
@@ -81,8 +111,7 @@ def build(rank, adj, vol, top_n, hold_n, scheme):
 
 # Live sleeve reality: $50k budget, IB $1.00 minimum per US equity order. The default
 # backtest assumes a $1,000,000 book, where the fixed floor is ~0.3bp and invisible.
-BOOK_SIZES = [(1_000_000, 0.0, "$1m book, proportional costs only (the BACKTEST default)"),
-              (50_000, 1.00, "$50k book, + $1.00/order fixed fee (the LIVE sleeve)")]
+BOOK_SIZES = [(50_000, 1.00, "$50k book, + $1.00/order fixed fee (the LIVE sleeve)")]
 
 
 def run_universe(universe: str, bucket: str, label: str) -> None:
@@ -109,7 +138,7 @@ def _run_costs(rank, adj, volume, close, vol, cfg, label, notional, fee, size_la
     print(f"  {'scheme':26s} {'turn':>5s} {'maxwt':>6s} | {'Sh FULL':>8s} {'ret':>7s} "
           f"{'dd':>7s} | {'Sh IS':>7s} | {'Sh OOS':>7s} {'ret OOS':>8s}")
     nets = {}
-    for scheme in ("equal", "inverse_vol_unbounded", "live_tilt"):
+    for scheme in ("equal", "live_tilt", "tilt_tight", "tilt_entry", "tilt_band"):
         w = build(rank, adj, vol, cfg.top_n, cfg.hold_n, scheme)
         net, turn = pnl(w, adj, volume, close, notional=notional, fixed_fee=fee)
         idx = net.replace(0.0, np.nan).dropna().index

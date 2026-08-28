@@ -33,7 +33,28 @@ class PaperConfig:
     max_new_buys_per_day: int = 1
     vol_target: float = 0.25   # annualized portfolio vol target
     vol_window: int = 63       # days for per-name realised vol
-    inv_vol_clip: tuple[float, float] = (0.5, 2.0)
+    # EQUAL WEIGHT as of 2026-08-28: (1.0, 1.0) makes every tilt exactly 1.0, so the code
+    # path stays intact and this is reversible by editing one line. Measured on the deployed
+    # factor set, at the LIVE $50k book size with IB's $1.00/order floor, inverse-vol tilting
+    # loses to equal weight on ALL THREE test universes and in every implementation tried:
+    #   scheme                          S&P500 PIT     S&P1500     small-cap
+    #   live_tilt   clip (0.5,2.0)      -2.08%/yr      -3.91%      -3.97%   (t -2.6 to -5.0)
+    #   tilt_tight  clip (0.7,1.5)      -1.72%         -3.10%      -3.21%
+    #   tilt_entry  fixed at entry      -1.85%         -4.73%      -3.74%
+    #   tilt_band   20% no-trade band   -2.04%         -4.09%      -3.97%
+    # 15 cells, no wins. Crucially `tilt_entry` cut turnover 4.11x -> 3.46x (killing 73% of
+    # the pure weight-drift churn) and performance did NOT recover -- so the drag is the
+    # WEIGHTING, not the turnover, and no implementation fixes it. See
+    # algo_trading/scripts/magic_weighting_universe_lab.py.
+    inv_vol_clip: tuple[float, float] = (1.0, 1.0)
+    # Cap on a single entry, as a multiple of equal weight. 1.0 is what actually CONVERGES a
+    # book that is currently vol-weighted: gap-based sizing recycles existing position sizes
+    # forever (simulated 180 rotations at 2.0x -> size spread unchanged at 4.0x), because
+    # selling a $2,700 name frees $2,700 and the replacement takes the whole gap. At 1.0x the
+    # book converges to exact equality through normal rotation, no forced rebalancing and no
+    # extra turnover (~4 months at 3.1x turnover). Also strictly tighter than the 2.0x that
+    # was protecting against the slots_free->1 collapse, so no regression there.
+    max_entry_mult: float = 1.0
     hold_days: int = HOLD_DAYS
     # Independent pre-trade guard. It re-derives every order from the budget rather than trusting
     # the sizing above, because a guard that reuses the strategy's arithmetic cannot catch the
@@ -99,7 +120,7 @@ def _slot_usd(state, marks: dict[str, float], fx: dict[str, float],
     # instead deploys ~equal-weight per day; excess cash trickles in over subsequent days, which is
     # fine for a slow monthly book. 2x gives drift room without approaching the cap.
     equal_weight = nav * gross_scalar / max(cfg.top_n, 1)
-    return min(slot, 2.0 * equal_weight)
+    return min(slot, cfg.max_entry_mult * equal_weight)
 
 
 def _size_shares(ticker: str, price_local: float, fx: float, tilts: pd.Series,
@@ -107,8 +128,10 @@ def _size_shares(ticker: str, price_local: float, fx: float, tilts: pd.Series,
     """Whole shares for one entry: its share of the remaining gap, inverse-vol tilted.
 
     The cash cap MUST be applied here, after the tilt. Capping `slot_usd` beforehand is not
-    enough: the actual spend is slot x tilt, and tilt runs to ~1.7, so a single order could
-    still overdraw. Long-only and funded, so cash is a hard constraint, not a preference.
+    enough: the actual spend is slot x tilt, so with any tilt > 1 a single order could still
+    overdraw. Long-only and funded, so cash is a hard constraint, not a preference.
+    (Tilt is currently pinned to 1.0 by `inv_vol_clip=(1.0,1.0)`, but this stays correct if
+    it is ever re-enabled.)
     """
     tilt = float(tilts.get(ticker, 1.0))
     if tilt != tilt or tilt <= 0:

@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from dataclasses import replace
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,16 +97,23 @@ for lab, v in [("low-vol-skewed (2.0 cap binds)", LOWSKEW),
     expect(f"tilts average exactly 1 — {lab}", close(float(t.mean()), 1.0, 1e-12))
     expect(f"tilts sum to n — {lab}", close(float(t.sum()), float(len(v)), 1e-9))
 
+# ---- tilt-mechanism tests -------------------------------------------------------------
+# The LIVE config pins the tilt to 1.0 (`inv_vol_clip=(1.0,1.0)`, equal weight, 2026-08-28).
+# The tilt code is retained and reversible, so these tests must exercise it with an EXPLICIT
+# wide clip rather than the live default -- otherwise they silently stop testing anything
+# the moment the default changes, which is exactly what happened when equal weight went in.
+TILT_CFG = replace(CFG, inv_vol_clip=(0.5, 2.0))
+
 # Show the raw overshoot the normalisation removes, so the number is on the record.
 _ref = float(np.nanmedian(HIGHSKEW.values))
-_raw = np.clip(_ref / HIGHSKEW, *CFG.inv_vol_clip)
+_raw = np.clip(_ref / HIGHSKEW, *TILT_CFG.inv_vol_clip)
 print(f"    raw (un-normalised) mean on the high-skew book = {_raw.mean():.4f} "
       f"-> book would run {_raw.mean():.1%} of budget with no way to correct it")
 expect("the adversarial case really does overshoot un-normalised (guard is not vacuous)",
        Check(_raw.mean() > 1.10, f"raw mean {_raw.mean():.4f}"))
 
 # Shape must be preserved: normalising changes the level, not the structure.
-t_hs = _normalised_tilts(HIGHSKEW, CFG)
+t_hs = _normalised_tilts(HIGHSKEW, TILT_CFG)
 expect("tilt SHAPE preserved (rank corr with raw = 1)",
        close(float(pd.Series(_raw.values).corr(pd.Series(t_hs.values), method="spearman")), 1.0, 1e-9))
 expect("tilts stay within the clip band after rescaling (no name exceeds 2x the mean)",
