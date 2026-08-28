@@ -85,6 +85,15 @@ MUTATIONS = [
 # exposure it was meant to close.
 BROKER = ROOT / "paper" / "broker.py"
 MUTATIONS += [
+    ("    return (1.0 / tol) <= r <= tol",
+     "    return True",
+     "unit guard always passes (100x LSE pence/pounds trap goes through)"),
+    ("    r = ib_price / mark",
+     "    r = 1.0",
+     "unit guard compares nothing (ratio hard-coded to agreement)"),
+    ("            if ccy.get(t, \"USD\") != \"USD\" and hasattr(broker, \"price\"):",
+     "            if False:",
+     "unit guard never invoked on foreign names"),
     ("        plan[ccy] = -bal          # trade the negative of the balance to reach zero",
      "        plan[ccy] = bal",
      "sweep direction inverted (DOUBLES the balance instead of closing it)"),

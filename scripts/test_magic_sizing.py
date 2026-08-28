@@ -468,6 +468,84 @@ expect("every swept currency in SUFFIX_MAP has an FX pair",
              str({c for c, _ in __import__("paper.broker", fromlist=["x"]).SUFFIX_MAP.values()})))
 
 
+
+# ---------------------------------------------------------------------------------------
+# BROKER-vs-FEED PRICE UNITS
+# ---------------------------------------------------------------------------------------
+# Sizing divides a USD slot by the yfinance mark; the position is then recorded at the IB
+# fill. Those must be denominated identically. The LSE quotes in PENCE while the IB contract
+# currency reads GBP, and IB ships ContractDetails.priceMagnifier precisely to reconcile
+# execution prices with market data -- but that only makes IB self-consistent, not consistent
+# with yfinance. A 100x disagreement makes cost_usd 100x too small, so cash barely moves and
+# the sizer keeps buying. Nothing raises.
+from paper.orchestrator import price_units_agree  # noqa: E402
+
+expect("identical prices agree", Check(price_units_agree(3344.5, 3344.5)))
+expect("ordinary intraday drift still agrees", Check(price_units_agree(3350.0, 3344.5)))
+expect("a stale bar within 5x still agrees", Check(price_units_agree(3000.0, 3344.5)))
+expect("IB in POUNDS vs mark in PENCE is REJECTED",
+       Check(not price_units_agree(33.445, 3344.5), "the 100x LSE trap"))
+expect("IB in PENCE vs mark in POUNDS is REJECTED (symmetric)",
+       Check(not price_units_agree(3344.5, 33.445)))
+# Boundaries: the tolerance must actually bind on both sides.
+expect("just inside 5x is accepted", Check(price_units_agree(4.99, 1.0)))
+expect("just outside 5x is rejected", Check(not price_units_agree(5.01, 1.0)))
+expect("just inside 1/5x is accepted", Check(price_units_agree(1.0, 4.99)))
+expect("just outside 1/5x is rejected", Check(not price_units_agree(1.0, 5.01)))
+# Missing/degenerate inputs are NOT this guard's job — other guards own them, and returning
+# False here would block every name whenever the broker is merely unreachable.
+expect("missing broker price passes through", Check(price_units_agree(None, 3344.5)))
+expect("missing mark passes through", Check(price_units_agree(3344.5, None)))
+expect("zero price passes through", Check(price_units_agree(0.0, 3344.5)))
+expect("negative price passes through", Check(price_units_agree(-1.0, 3344.5)))
+
+
+# INTEGRATION: the guard must actually be WIRED INTO the buy loop. Testing price_units_agree
+# as a pure function proves the arithmetic and nothing else — a mutation that stopped the loop
+# from ever calling it survived exactly that way. These drive run_daily end to end.
+class _UnitBroker(_StubBroker):
+    """Stub whose quoted price disagrees with the mark by `factor`, mimicking IB reporting
+    LSE fills in pounds while the yfinance mark is in pence."""
+
+    def __init__(self, factor):
+        super().__init__()
+        self.factor = factor
+
+    def price(self, ticker):
+        return 100.0 * self.factor        # fixture marks are ~100
+
+
+def _run_ccy(px, ranking, state, factor, ccy="GBp", today="2026-08-17", **cfg_kw):
+    brk = _UnitBroker(factor)
+    panels = {"adj": px, "currency": {c: ccy for c in px.columns}}
+    from paper.orchestrator import run_daily
+    # top_n must be large enough that one order clears the 15% single-order cap: at top_n=3
+    # every order is 33% of budget and the guard rejects the whole list, so BOTH arms would
+    # emit zero buys and the comparison could not fail. budget is pinned to the fixture cash
+    # for the same reason -- the default $100k would make the cap bind on a $50k book.
+    cfg = PaperConfig(max_new_buys_per_day=3, budget=50_000.0, **cfg_kw)
+    run_daily(state, ranking, panels, {ccy: 1.0, "USD": 1.0}, brk, cfg, today)
+    return brk.orders
+
+
+_empty = book(50_000.0, {})
+_buys_ok = [o for o in _run_ccy(_px, _rank, _empty, factor=1.0, hold_n=12, top_n=10)
+            if o[0] == "BUY"]
+expect("foreign names DO trade when broker and mark agree", Check(len(_buys_ok) > 0,
+       f"{_buys_ok}"))
+
+_empty2 = book(50_000.0, {})
+_buys_bad = [o for o in _run_ccy(_px, _rank, _empty2, factor=0.01, hold_n=12, top_n=10)
+             if o[0] == "BUY"]
+expect("NO buy is placed when the broker price is 100x off the mark",
+       Check(len(_buys_bad) == 0, f"{_buys_bad}"))
+
+# USD names must be unaffected — the guard is for foreign venues and must not gate the S&P.
+_empty3 = book(50_000.0, {})
+_buys_usd = [o for o in _run_ccy(_px, _rank, _empty3, factor=0.01, ccy="USD",
+                                 hold_n=12, top_n=10) if o[0] == "BUY"]
+expect("USD names are NOT gated by the unit guard", Check(len(_buys_usd) > 0, f"{_buys_usd}"))
+
 print("\n" + "=" * 92)
 if fails:
     print(f"{len(fails)} FAILURE(S) of {ran}:")

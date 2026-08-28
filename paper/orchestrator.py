@@ -125,6 +125,34 @@ def run_fx_sweep(broker, balances: dict[str, float], fx: dict[str, float],
     return out
 
 
+def price_units_agree(ib_price: float | None, mark: float | None,
+                      tol: float = 5.0) -> bool:
+    """Do the BROKER's price and the DATA FEED's mark use the same units?
+
+    Sizing divides a USD slot by `mark` (yfinance) but the position is then recorded at the
+    IB fill, and the two are only comparable if they are denominated identically. That is not
+    guaranteed. The London Stock Exchange quotes in PENCE while the IB contract currency says
+    GBP; IB's own `ContractDetails.priceMagnifier` exists precisely to reconcile execution
+    prices with market data ("allows execution and strike prices to be reported consistently
+    with market data, historical data and the order price"), which means the discrepancy is
+    real enough that IB ships a field for it. `priceMagnifier` only makes IB self-consistent,
+    though — it says nothing about agreeing with yfinance, which is the comparison that
+    actually matters here.
+
+    A factor-of-100 disagreement does not fail loudly. It makes `cost_usd` 100x too small, so
+    cash barely moves, the sizer believes it has budget left and keeps buying. This returns
+    False on any disagreement beyond `tol`, which catches the whole class rather than pence
+    specifically — the same failure would arrive silently with any venue quoted in a minor
+    unit (ZAc, ILA) if one were ever added.
+
+    A generous 5x tolerance: intraday drift and a stale bar are normal, a unit error is 100x.
+    """
+    if not ib_price or not mark or ib_price <= 0 or mark <= 0:
+        return True                     # nothing to compare — other guards own that case
+    r = ib_price / mark
+    return (1.0 / tol) <= r <= tol
+
+
 def _annual_vol(adj: pd.DataFrame, window: int) -> pd.Series:
     r = adj.pct_change(fill_method=None)
     return r.tail(window).std() * np.sqrt(252)
@@ -336,7 +364,17 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
             shares = _size_shares(t, price_local, f, tilts, slot, state.cash)
             if shares <= 0:
                 continue
-            if cfg.use_risk_guard:
+            # PRE-trade unit check, and it must stay pre-trade: once a fill comes back the
+            # trade is done and there is no safe entry_price to record. Only meaningful for
+            # non-USD names, and only when the broker can actually quote (never in dry-run).
+            if ccy.get(t, "USD") != "USD" and hasattr(broker, "price"):
+                ib_px = broker.price(t)
+                if not price_units_agree(ib_px, price_local):
+                    msg = (f"{t}: broker price {ib_px} vs mark {price_local} "
+                           f"({ib_px / price_local:.3g}x) — UNIT MISMATCH, not traded")
+                    logging.error(msg)
+                    rejects.append(msg)
+                    continue
                 lim = RiskLimits.for_equities(state.nav(marks, fx) or cfg.budget)
                 ok_px = price_sane(t, price_local, priors.get(t), lim)
                 if not ok_px:
