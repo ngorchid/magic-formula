@@ -78,7 +78,12 @@ BOOK_LEVELS = {"derisk": (0.10, 0.5), "reduce_only": (0.18, 0.0), "halt": (0.25,
 # to BreakerLevels.from_vol, so with no live history the levels sit exactly at from_vol(prior).
 # Testing only the fixed 15/25/35 above measured levels nobody runs -- the lab was reporting a
 # -0.35 Sharpe for magic formula that its own deployed configuration does not incur.
-VOL_PRIOR = {"trend": 0.124, "magic-formula": 0.190, "options-vrp": 0.063}
+# ⚠ MIRRORS the runners — keep in sync or this lab reports levels nobody runs, which is the
+# exact failure the note above describes. Sources: run_trend_paper.py:62, run_paper.py:64,
+# options-vrp/scripts/run_options_paper.py:67.
+# magic-formula 0.190 -> 0.165 on 2026-08-28: the 19.0% described a US-only book while the live
+# sleeve holds US + Europe. See magic_vol_prior_universe_lab.py (commit 656a504).
+VOL_PRIOR = {"trend": 0.124, "magic-formula": 0.165, "options-vrp": 0.063}
 
 
 def live_levels(strategy: str) -> tuple[dict, str]:

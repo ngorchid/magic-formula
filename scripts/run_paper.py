@@ -61,7 +61,28 @@ STATE_FILE = ROOT / "results" / "paper" / "state.json"
 #
 # ⚠ UPDATE THIS if the configuration materially changes the book's risk (top_n, weighting,
 # universe floor) — the recorded history will not reflect it for months.
-VOL_PRIOR = 0.190
+#
+# ⚠ CORRECTED 2026-08-28 from 19.0%, measured in scripts/magic_vol_prior_universe_lab.py
+# (commit 656a504). The 19.0% came from the S&P 500 PIT backtest and so describes a US-ONLY
+# book, but the live sleeve has held US + eurozone for months and now holds all of Europe.
+# Measured vol of a 30-name equal-weight book, USD returns with unhedged FX included:
+#     US only         19.22%   <- what 19.0% described; the method's validity check, since it
+#                                 reproduces the PIT backtest's number almost exactly
+#     US + eurozone   16.92%   <- ALREADY the live universe, so most of the staleness
+#     US + all Europe 16.62%   <- the 2026-08-28 widening adds only a further -0.30pp
+# Vol goes DOWN: diversification beats unhedged FX comfortably, and European large caps are
+# individually LESS volatile in USD than US ones (17.92%) even carrying the currency move.
+# Robust to the European share of the book — monotonic and saturating by ~40%, so anything
+# from 20% upward implies 16.3-17.5%. 16.5% is the middle of that range.
+#
+# CONSEQUENCE: this TIGHTENS the breaker (derisk 22.80% -> 19.80%). The old levels were too
+# WIDE, i.e. the book would have fallen further than intended before halving exposure.
+#
+# NB this is not a backtest and could not be — run_best_magic.py loads fundamentals with
+# sources=("edgar",), US filings only, and the European names have no PIT membership data.
+# It measures book vol from prices, which is what the prior actually claims. A random draw
+# carries no value/quality tilt, so treat the deltas as the result and the levels as the check.
+VOL_PRIOR = 0.165
 RANK_CACHE = ROOT / "results" / "paper" / "ranking.json"
 PANEL_CACHE = ROOT / "results" / "paper" / "panels.pkl"
 
