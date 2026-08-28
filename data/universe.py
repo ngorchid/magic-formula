@@ -134,38 +134,128 @@ def sp1500_sectors() -> pd.Series:
     return sp1500_constituents().set_index("ticker")["sector"]
 
 
-# --- European (eurozone / EUR) universe ------------------------------------
-# Current constituents of the major eurozone national indices, whose Wikipedia tables
-# already carry yfinance-suffixed tickers (ADS.DE, AC.PA, ABN.AS, ...). All EUR-quoted,
-# so cross-sectional signals aren't polluted by FX. Current-only -> survivorship-biased.
+# --- European universe ------------------------------------------------------
+# Current constituents of the major European national indices, scraped from Wikipedia.
+# Current-only => SURVIVORSHIP-BIASED; there is no PIT membership data for these venues, so
+# any backtest on them overstates. The live sleeve is unaffected (it only needs today's list).
+#
+# Each entry is (url, suffix). The suffix is NOT cosmetic: only the original big five publish
+# yfinance-form tickers (ADS.DE, AC.PA). The venues added 2026-08-28 publish BARE or
+# EXCHANGE-PREFIXED symbols -- "Euronext Brussels:\xa0ABI", "OSE: AKRBP", "MAERSK B" -- so the
+# earlier "keep anything already ending in a known suffix" filter silently discarded every one
+# of them and the scrape returned nothing at all for six of the ten indices. Normalising per
+# venue is what makes them usable.
 EURO_INDEX_PAGES = {
-    "DAX": "https://en.wikipedia.org/wiki/DAX",
-    "CAC 40": "https://en.wikipedia.org/wiki/CAC_40",
-    "AEX": "https://en.wikipedia.org/wiki/AEX_index",
-    "IBEX 35": "https://en.wikipedia.org/wiki/IBEX_35",
-    "FTSE MIB": "https://en.wikipedia.org/wiki/FTSE_MIB",
+    "DAX": ("https://en.wikipedia.org/wiki/DAX", ".DE"),
+    "CAC 40": ("https://en.wikipedia.org/wiki/CAC_40", ".PA"),
+    "AEX": ("https://en.wikipedia.org/wiki/AEX_index", ".AS"),
+    "IBEX 35": ("https://en.wikipedia.org/wiki/IBEX_35", ".MC"),
+    "FTSE MIB": ("https://en.wikipedia.org/wiki/FTSE_MIB", ".MI"),
+    # Added 2026-08-28: eurozone venues the broker already supports, at ZERO incremental FX
+    # exposure. Fundamentals coverage was measured first and is not the blocker -- .BR 75%,
+    # .HE 75%, .IR 67%, .LS 100% usable against the live yfinance extraction path, versus 83%
+    # for the incumbent five indices and 67% for the US control itself.
+    "BEL 20": ("https://en.wikipedia.org/wiki/BEL_20", ".BR"),
+    "OMX Helsinki 25": ("https://en.wikipedia.org/wiki/OMX_Helsinki_25", ".HE"),
+    "ISEQ 20": ("https://en.wikipedia.org/wiki/ISEQ_20", ".IR"),
+    "PSI": ("https://en.wikipedia.org/wiki/PSI-20", ".LS"),
+    # VIENNA (.VI) IS DELIBERATELY ABSENT. Neither the English nor the German ATX article
+    # carries a ticker/ISIN column -- the constituent table is Company/Industry/Sector only --
+    # so there is nothing to scrape, and mapping ~20 company names to symbols by hand would be
+    # a static list masquerading as a feed. Costs ~20 names; revisit with a real index source.
 }
-_EUR_SUFFIXES = (".DE", ".PA", ".AS", ".MC", ".MI")
+
+# Non-eurozone Europe. Separate because every one of these adds a CURRENCY, and the sleeve
+# holds unhedged local-currency equity, so the FX move lands directly in the P&L. Measured
+# 2026-08-28 that contribution is 0.02-0.19pp of portfolio vol -- small enough that excluding
+# a company purely for being quoted in CHF or SEK is not defensible. The real argument FOR
+# them is diversification: these markets correlate 0.60-0.87 with the current EUR book, versus
+# 0.96-0.97 among the eurozone indices themselves, which are nearly the same bet.
+# WARNING .L is quoted in PENCE. See _MINOR_UNITS in paper/live_data.py -- without that table
+# every LSE market cap is 100x too large and the size filter is silently defeated.
+NON_EUR_INDEX_PAGES = {
+    "FTSE 100": ("https://en.wikipedia.org/wiki/FTSE_100_Index", ".L"),
+    "SMI": ("https://en.wikipedia.org/wiki/Swiss_Market_Index", ".SW"),
+    "OMX Stockholm 30": ("https://en.wikipedia.org/wiki/OMX_Stockholm_30", ".ST"),
+    "OMX Copenhagen 25": ("https://en.wikipedia.org/wiki/OMX_Copenhagen_25", ".CO"),
+    "OBX": ("https://en.wikipedia.org/wiki/OBX_Index", ".OL"),
+}
+
+_EUR_SUFFIXES = tuple(sfx for _, sfx in EURO_INDEX_PAGES.values())
+_NON_EUR_SUFFIXES = tuple(sfx for _, sfx in NON_EUR_INDEX_PAGES.values())
+_ALL_SUFFIXES = _EUR_SUFFIXES + _NON_EUR_SUFFIXES
 
 
-@lru_cache(maxsize=1)
-def european_eur_tickers() -> list[str]:
-    """Deduped large-cap eurozone tickers (EUR only) from the major national indices,
-    already in yfinance form. Current constituents => survivorship-biased."""
+def _normalise_ticker(raw: str, suffix: str) -> str | None:
+    """Wikipedia cell -> yfinance ticker, or None if it isn't a symbol at all.
+
+    Handles the three shapes actually observed on these pages (2026-08-28):
+      "Euronext Brussels:\xa0ABI" -> ABI.BR     (exchange prefix, non-breaking space)
+      "OSE: AKRBP"                -> AKRBP.OL   (prefix with an ordinary space)
+      "MAERSK B"                  -> MAERSK-B.CO (Nordic share class; yfinance uses a hyphen)
+    A symbol that already carries a known venue suffix is returned untouched, so the original
+    five indices are unaffected.
+    """
+    t = str(raw).replace("\xa0", " ").strip()
+    if ":" in t:                      # drop an exchange prefix
+        t = t.split(":")[-1].strip()
+    if not t or t.lower() == "nan":
+        return None
+    if t.endswith(_ALL_SUFFIXES):     # already yfinance form
+        return t
+    # Share-class separators. Wikipedia writes these as a space ("MAERSK B") or a dot
+    # ("BT.A"); yfinance uses a hyphen in the root and reserves the dot for the venue suffix,
+    # so "BT.A" + ".L" would otherwise yield the unresolvable "BT.A.L" instead of "BT-A.L".
+    t = t.replace(" ", "-").replace(".", "-")
+    # Reject prose that slipped out of a merged/misaligned cell.
+    if not all(c.isalnum() or c in "-." for c in t) or len(t) > 12:
+        return None
+    return t + suffix
+
+
+def _scrape_index_tickers(pages: dict[str, tuple[str, str]], min_rows: int = 12) -> list[str]:
+    """Deduped, yfinance-form tickers from Wikipedia constituent tables.
+
+    `min_rows` guards against grabbing a sidebar or summary table instead of the constituent
+    list. It is looser than the 15 the big five used, because ISEQ 20 / OMXC25 / OBX / BEL 20
+    legitimately list only ~20 names.
+    """
     out: set[str] = set()
-    for name, url in EURO_INDEX_PAGES.items():
+    for name, (url, suffix) in pages.items():
         try:
             resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
             resp.raise_for_status()
             for tbl in pd.read_html(io.StringIO(resp.text)):
                 cols = [str(c) for c in tbl.columns]
-                tc = next((c for c in cols if "Ticker" in c or "Symbol" in c), None)
-                if tc and len(tbl) >= 15:
-                    out |= {str(x).strip() for x in tbl[tc] if isinstance(x, str)}
+                tc = next((c for c in cols if "Ticker" in c or "Symbol" in c
+                           or "MNEM" in c), None)   # ISEQ labels its column "MNEM code"
+                if tc and len(tbl) >= min_rows:
+                    got = {_normalise_ticker(x, suffix) for x in tbl[tc]}
+                    out |= {t for t in got if t}
                     break
+            else:
+                print(f"[universe] {name}: no constituent table found; skipping")
         except Exception as e:  # noqa: BLE001 - skip an index that fails to fetch
             print(f"[universe] {name} fetch failed ({e!r}); skipping")
-    return sorted(t for t in out if t.endswith(_EUR_SUFFIXES))
+    return sorted(out)
+
+
+@lru_cache(maxsize=1)
+def european_eur_tickers() -> list[str]:
+    """Deduped large-cap EUROZONE tickers (EUR-quoted only), in yfinance form."""
+    return _scrape_index_tickers(EURO_INDEX_PAGES)
+
+
+@lru_cache(maxsize=1)
+def european_non_eur_tickers() -> list[str]:
+    """Deduped large-cap NON-eurozone European tickers (GBp/CHF/SEK/DKK/NOK), yfinance form."""
+    return _scrape_index_tickers(NON_EUR_INDEX_PAGES)
+
+
+@lru_cache(maxsize=1)
+def european_tickers() -> list[str]:
+    """All European names: eurozone plus non-eurozone."""
+    return sorted(set(european_eur_tickers()) | set(european_non_eur_tickers()))
 
 
 # --- Broad US universe (all SEC filers) ------------------------------------

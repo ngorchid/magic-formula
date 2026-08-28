@@ -27,8 +27,14 @@ def todays_ranking(panels: dict, cfg: EnhancedMagicConfig,
                    min_mcap_usd: float = 500e6) -> pd.Series:
     """Series (ticker -> rank score, higher = more attractive) for TODAY, eligible only."""
     elig = build_eligibility(panels, cfg, min_mcap_usd)
-    # Value ratios must use LOCAL-currency mcap so numerator/denominator currencies match.
-    rank = enhanced_rank(panels["f"], panels["mcap_local"], panels["adj"], elig, cfg)
+    # Value ratios need numerator and denominator in the SAME currency. This used to pass
+    # local-currency mcap to match locally-reported statements, which silently assumed a
+    # company quotes in the currency it reports in. That is false for ~7% of the European
+    # universe (SHEL, AZN, HSBA, BP, EQNR, ABI report USD but quote GBp/NOK/EUR) and the
+    # scale was off by 100x for every pence-quoted LSE name. `fetch_live_panels` now converts
+    # BOTH sides to USD at their own correct rates, so "mcap" is the currency-consistent
+    # input and the assumption is gone rather than merely documented.
+    rank = enhanced_rank(panels["f"], panels["mcap"], panels["adj"], elig, cfg)
     today = rank.iloc[-1].dropna().sort_values(ascending=False)
     return today
 
