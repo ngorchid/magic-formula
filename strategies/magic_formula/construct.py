@@ -119,11 +119,25 @@ def weights_banded(rank: pd.DataFrame, adj: pd.DataFrame, rebalance: str,
 
 def pnl(weights: pd.DataFrame, adj: pd.DataFrame, volume: pd.DataFrame,
         close: pd.DataFrame, notional: float = 1_000_000.0,
-        half_spread_bps: float = 2.5, impact_coef_bps: float = 10.0) -> tuple[pd.Series, float]:
+        half_spread_bps: float = 2.5, impact_coef_bps: float = 10.0,
+        fixed_fee: float = 0.0) -> tuple[pd.Series, float]:
     """Weights -> (net-return series after costs, annualised turnover = Σ|Δw|/yr).
 
     Cost bps default to a large-cap assumption; raise them (e.g. 20/30) for small caps,
     where the ADV-scaled impact term additionally penalises the least liquid names.
+
+    ⚠ `notional` is the ASSUMED BOOK SIZE and it defaults to $1,000,000, which is 20x the
+    live magic-formula sleeve ($50,000). That matters because the spread/impact terms are
+    PROPORTIONAL, so they are size-invariant in bps, while real broker costs have a FIXED
+    FLOOR per order (IB: $1.00 minimum per US equity order, more on European venues). At
+    $1m a position is ~$33k and the floor is ~0.3bp — genuinely negligible, which is why it
+    was left out. At $50k a position is $758-$3,033 after the inverse-vol tilt, where the
+    same $1 floor is 3-13bp per side. Ignoring it there understates cost by an order of
+    magnitude on the smallest positions.
+
+    `fixed_fee` is dollars PER ORDER, charged on every name whose target weight changes.
+    It defaults to 0.0 so existing results are unchanged; pass 1.0 (IB US equity minimum)
+    together with a realistic `notional` to measure the live configuration.
     """
     adj_clean = adj.where(adj > 0)
     rets = adj_clean.pct_change(fill_method=None)
@@ -135,6 +149,14 @@ def pnl(weights: pd.DataFrame, adj: pd.DataFrame, volume: pd.DataFrame,
     adv = adv.fillna(adv.median().median())
     cost = LinearCostModel(half_spread_bps=half_spread_bps, impact_coef_bps=impact_coef_bps)
     costs = cost.charge(dw * notional, adv) / notional
+
+    if fixed_fee > 0:
+        # One order per name whose weight actually moves. Weights are held constant between
+        # rebalances (ffill), so dw is exactly zero on non-trading days and the count is the
+        # real order count rather than an artefact of daily indexing.
+        orders = (dw * notional > 1e-9).sum(axis=1)
+        costs = costs + orders * fixed_fee / notional
+
     years = max((weights.index[-1] - weights.index[0]).days / 365.0, 1e-9)
     return gross - costs, float(dw.sum(axis=1).sum() / years)
 

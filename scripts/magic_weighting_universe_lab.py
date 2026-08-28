@@ -79,8 +79,17 @@ def build(rank, adj, vol, top_n, hold_n, scheme):
     return target.ffill().fillna(0.0).shift(1).fillna(0.0)
 
 
+# Live sleeve reality: $50k budget, IB $1.00 minimum per US equity order. The default
+# backtest assumes a $1,000,000 book, where the fixed floor is ~0.3bp and invisible.
+BOOK_SIZES = [(1_000_000, 0.0, "$1m book, proportional costs only (the BACKTEST default)"),
+              (50_000, 1.00, "$50k book, + $1.00/order fixed fee (the LIVE sleeve)")]
+
+
 def run_universe(universe: str, bucket: str, label: str) -> None:
-    cfg = EnhancedMagicConfig()
+    # Graham OFF: matches scripts/run_paper.py, i.e. the factor set actually deployed.
+    # With it on there are 4 families at 1/4; off there are 3 at 1/3, so the whole rank
+    # differs and a weighting comparison run with it on is not the live book's comparison.
+    cfg = EnhancedMagicConfig(use_graham=False)
     print(f"\n[load] {label} …")
     adj, close, volume, spy, base, mcap, f, _ = _load(
         universe, cfg, "2012-01-01", pd.Timestamp.today().strftime("%Y-%m-%d"))
@@ -88,15 +97,21 @@ def run_universe(universe: str, bucket: str, label: str) -> None:
     rank = enhanced_rank(f, mcap, adj, elig, cfg)
     vol = adj.pct_change(fill_method=None).rolling(cfg.vol_window).std()
 
+    for notional, fee, size_label in BOOK_SIZES:
+        _run_costs(rank, adj, volume, close, vol, cfg, label, notional, fee, size_label)
+
+
+def _run_costs(rank, adj, volume, close, vol, cfg, label, notional, fee, size_label) -> None:
     print("=" * 104)
-    print(f"{label}  (selection identical across schemes; difference is SIZING alone)")
+    print(f"{label}")
+    print(f"  {size_label}")
     print("=" * 104)
     print(f"  {'scheme':26s} {'turn':>5s} {'maxwt':>6s} | {'Sh FULL':>8s} {'ret':>7s} "
           f"{'dd':>7s} | {'Sh IS':>7s} | {'Sh OOS':>7s} {'ret OOS':>8s}")
     nets = {}
     for scheme in ("equal", "inverse_vol_unbounded", "live_tilt"):
         w = build(rank, adj, vol, cfg.top_n, cfg.hold_n, scheme)
-        net, turn = pnl(w, adj, volume, close)
+        net, turn = pnl(w, adj, volume, close, notional=notional, fixed_fee=fee)
         idx = net.replace(0.0, np.nan).dropna().index
         net = net.reindex(idx).fillna(0.0)
         nets[scheme] = net
