@@ -41,6 +41,37 @@ def ib_contract_spec(yf_ticker: str) -> tuple[str, str, str]:
     return yf_ticker, "USD", ""
 
 
+# ccy -> (IB pair, is the ccy the BASE of that pair?). IB quotes minor currencies against USD
+# as base (USDCHF, USDSEK...), majors the other way (EURUSD, GBPUSD), and an FX order quantity
+# is ALWAYS in the pair's base currency. Getting this backwards does not fail loudly -- it
+# doubles the exposure it was meant to close -- so the direction is derived here, as a pure
+# function, and tested rather than assumed.
+FX_PAIRS = {"EUR": ("EURUSD", True), "GBP": ("GBPUSD", True),
+            "CHF": ("USDCHF", False), "SEK": ("USDSEK", False),
+            "DKK": ("USDDKK", False), "NOK": ("USDNOK", False)}
+
+
+def fx_order_spec(ccy: str, amount_ccy: float, rate_usd: float) -> tuple[str, str, int]:
+    """(pair, action, quantity) to trade `amount_ccy` units of `ccy` against USD.
+
+    Positive `amount_ccy` = ACQUIRE that currency (covering a short financed at the debit
+    rate); negative = sell it back to USD. `rate_usd` is USD per 1 unit of ccy and is used only
+    when USD is the pair's base, where the order size must be expressed in USD.
+    """
+    spec = FX_PAIRS.get(ccy)
+    if spec is None:
+        return ("", "", 0)
+    pair, ccy_is_base = spec
+    if ccy_is_base:
+        action, qty = ("BUY" if amount_ccy > 0 else "SELL"), abs(amount_ccy)
+    else:
+        # USD is the base, so the direction INVERTS: acquiring CHF means selling USDCHF, and
+        # the quantity is the USD amount, not the CHF amount.
+        action = "SELL" if amount_ccy > 0 else "BUY"
+        qty = abs(amount_ccy) * (rate_usd or 0.0)
+    return (pair, action, int(round(qty)))
+
+
 class Broker:
     def __init__(self, host="127.0.0.1", port=7497, client_id=5,
                  gateway_bat: str | None = None, dry_run: bool = False):
@@ -223,3 +254,82 @@ class Broker:
         except Exception as e:  # noqa: BLE001
             logging.error("order failed %s %s %d: %s", action, ticker, shares, e)
             return {"ok": False, "status": "error", "fill_price": None}
+
+    # ---- FX cash sweep -------------------------------------------------------------------
+    # WHY THIS EXISTS. IB does not auto-convert. Buying a EUR-denominated stock from a
+    # USD-funded margin account leaves a NEGATIVE EUR cash balance financed at the first-tier
+    # debit rate (measured 2026-08-28 on the IBKR UK schedule: EUR 3.697%, GBP 5.227%, CHF
+    # 1.500%, SEK 3.154%, DKK 4.796% (BM+3%, the only one), NOK 5.636%). On a $50k book that is
+    # ~50% European that runs ~$1,094/yr gross, ~$822/yr net of the USD credit forgone — 1.64%
+    # of NAV against a strategy whose whole edge is a few percent. Sweeping costs $2 per FX
+    # order, so ~$144/yr at six currencies swept monthly. Converting saves ~1.36% of NAV/yr.
+    #
+    # The borrow IS a partial FX hedge (long stock in EUR, short EUR cash leaves the principal
+    # naturally hedged) and closing it raises measured book vol 15.68% -> 16.55%. That is a
+    # real cost, and it loses decisively: 1.36% of NAV/yr to avoid 0.87pp of vol on a 16.5%-vol
+    # book. Converting ALSO makes the book's own accounting correct — Position.pnl_usd models a
+    # fully unhedged position, which is only true once the balance is swept.
+
+    # ccy -> (IB pair, is the ccy the BASE of that pair?). IB quotes minor currencies against
+    # USD as base (USDCHF, USDSEK...), majors the other way (EURUSD, GBPUSD), and the order
+    # quantity is always in the pair's BASE currency — which is why the direction has to be
+    # tracked rather than assumed.
+    FX_PAIRS = FX_PAIRS      # module-level; kept as an attribute for callers that had it
+
+    def cash_balances(self) -> dict[str, float]:
+        """{currency: settled cash balance}. Empty dict if unavailable — callers must treat
+        that as "do not sweep" rather than "nothing to sweep"."""
+        if self.dry_run:
+            return {}
+        out: dict[str, float] = {}
+        try:
+            for v in self.ib.accountValues():
+                if v.tag == "CashBalance" and v.currency not in ("BASE", ""):
+                    out[v.currency] = out.get(v.currency, 0.0) + float(v.value)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("cash_balances failed: %s", e)
+            return {}
+        return out
+
+    def convert_fx(self, ccy: str, amount_ccy: float, rate_usd: float,
+                   wait: float = 20.0) -> dict:
+        """Trade `amount_ccy` units of `ccy` against USD. Positive = ACQUIRE that currency
+        (covers a short balance); negative = sell it back to USD.
+
+        `rate_usd` is USD per 1 unit of ccy, used only to express the order size when USD is
+        the pair's base currency.
+        """
+        if ccy == "USD" or abs(amount_ccy) < 1.0:
+            return {"ok": False, "status": "noop", "filled": 0.0}
+        spec = self.FX_PAIRS.get(ccy)
+        if spec is None:
+            logging.warning("no FX pair mapped for %s — not swept", ccy)
+            return {"ok": False, "status": "unmapped", "filled": 0.0}
+        pair, action, qty = fx_order_spec(ccy, amount_ccy, rate_usd)
+        if qty <= 0:
+            return {"ok": False, "status": "zero_qty", "filled": 0.0}
+        if self.dry_run:
+            logging.info("[DRY RUN] FX %s %d %s (%+.0f %s)", action, qty, pair, amount_ccy, ccy)
+            return {"ok": True, "status": "dryrun", "filled": float(amount_ccy)}
+        from ib_insync import Forex, MarketOrder
+        try:
+            c = Forex(pair)
+            self.ib.qualifyContracts(c)
+            order = MarketOrder(action, qty)
+            order.tif = "DAY"
+            trade = self.ib.placeOrder(c, order)
+            waited = 0.0
+            while waited < wait:
+                self.ib.sleep(1.0)
+                waited += 1.0
+                if trade.orderStatus.status == "Filled" or trade.orderStatus.status in self._DEAD:
+                    break
+            st = trade.orderStatus.status
+            if st in self._DEAD:
+                logging.warning("FX %s %d %s NOT live (status=%s)", action, qty, pair, st)
+                return {"ok": False, "status": st, "filled": 0.0}
+            logging.info("FX %s %d %s -> %s", action, qty, pair, st)
+            return {"ok": True, "status": st, "filled": float(amount_ccy)}
+        except Exception as e:  # noqa: BLE001
+            logging.error("FX convert failed %s %s: %s", ccy, amount_ccy, e)
+            return {"ok": False, "status": "error", "filled": 0.0}

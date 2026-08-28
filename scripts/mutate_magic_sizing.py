@@ -45,9 +45,9 @@ MUTATIONS = [
      "non-positive guard removed (emits a BUY for negative shares)"),
 
     # --- REGRESSION 3: a full book aims the whole idle gap at ONE order ---
-    ("    return min(slot, 2.0 * equal_weight)",
+    ("    return min(slot, cfg.max_entry_mult * equal_weight)",
      "    return slot",
-     "2x equal-weight cap removed (full book -> ~16% of NAV in one order)"),
+     "entry cap removed (full book -> ~16% of NAV in one order)"),
     ("    equal_weight = nav * gross_scalar / max(cfg.top_n, 1)",
      "    equal_weight = nav * gross_scalar",
      "equal-weight computed without dividing by top_n (cap never binds)"),
@@ -79,20 +79,53 @@ MUTATIONS = [
 ]
 
 
+# --- FX CASH SWEEP (added 2026-08-28) ---------------------------------------------------
+# The sweep PLACES ORDERS, so a fault here spends money rather than mis-reporting. The
+# direction mutations matter most: an inverted action does not fail loudly, it doubles the
+# exposure it was meant to close.
+BROKER = ROOT / "paper" / "broker.py"
+MUTATIONS += [
+    ("        plan[ccy] = -bal          # trade the negative of the balance to reach zero",
+     "        plan[ccy] = bal",
+     "sweep direction inverted (DOUBLES the balance instead of closing it)"),
+    ("        if abs(bal * rate) < min_usd:",
+     "        if abs(bal) < min_usd:",
+     "threshold on UNITS not USD (never sweeps SEK/NOK; sweeps tiny GBP)"),
+    ("        if not rate or rate <= 0 or not np.isfinite(rate):",
+     "        if False:",
+     "missing/NaN rate no longer skipped (sizes an order off a bad rate)"),
+    ("        if ccy == \"USD\" or not bal:",
+     "        if not bal:",
+     "USD itself swept (would trade USDUSD / corrupt the plan)"),
+    ("        action, qty = (\"BUY\" if amount_ccy > 0 else \"SELL\"), abs(amount_ccy)",
+     "        action, qty = (\"SELL\" if amount_ccy > 0 else \"BUY\"), abs(amount_ccy)",
+     "ccy-as-base direction inverted (EUR/GBP traded the wrong way)", BROKER),
+    ("        action = \"SELL\" if amount_ccy > 0 else \"BUY\"",
+     "        action = \"BUY\" if amount_ccy > 0 else \"SELL\"",
+     "USD-as-base direction NOT inverted (CHF/SEK/DKK/NOK wrong way)", BROKER),
+    ("        qty = abs(amount_ccy) * (rate_usd or 0.0)",
+     "        qty = abs(amount_ccy)",
+     "USD-base order sized in foreign units, not USD (SEK ~10x too large)", BROKER),
+]
+
+
 def main() -> int:
-    original = TARGET.read_text()
+    originals = {f: f.read_text() for f in {TARGET, BROKER}}
     results = []
     print("=" * 92)
-    print(f"MUTATION TEST — {TARGET.relative_to(ROOT)} against {SUITE[1]}")
+    print(f"MUTATION TEST — orchestrator.py + broker.py against {SUITE[1]}")
     print("=" * 92)
     print(f"  {len(MUTATIONS)} seeded faults; every one must be CAUGHT\n")
     try:
-        for find, repl, why in MUTATIONS:
-            if find not in original:
+        for mut in MUTATIONS:
+            find, repl, why = mut[0], mut[1], mut[2]
+            tgt = mut[3] if len(mut) > 3 else TARGET
+            base = originals[tgt]
+            if find not in base:
                 results.append((why, None))
                 print(f"  [ ?? ] {why:70} PATTERN MISSING")
                 continue
-            TARGET.write_text(original.replace(find, repl, 1))
+            tgt.write_text(base.replace(find, repl, 1))
             for pyc in ROOT.rglob("*.pyc"):
                 pyc.unlink(missing_ok=True)
             r = subprocess.run(SUITE, cwd=ROOT, capture_output=True, text=True)
@@ -101,7 +134,8 @@ def main() -> int:
             print(f"  [{'ok  ' if caught else 'FAIL'}] {why:70} "
                   f"{'CAUGHT' if caught else '*** SURVIVED ***'}")
     finally:
-        TARGET.write_text(original)
+        for f, text in originals.items():
+            f.write_text(text)
         for pyc in ROOT.rglob("*.pyc"):
             pyc.unlink(missing_ok=True)
 

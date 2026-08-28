@@ -61,6 +61,68 @@ class PaperConfig:
     # strategy's own bug — and this file had exactly such a bug (gross reaching ~2x budget) two
     # days before it was wired in. Rejections are LOGGED and skipped, never silent.
     use_risk_guard: bool = True
+    # FX cash sweep. IB does not auto-convert, so a European buy leaves a NEGATIVE balance in
+    # that currency, financed at the first tier (IBKR UK, 2026-08-28: EUR 3.697%, GBP 5.227%,
+    # CHF 1.500%, SEK 3.154%, DKK 4.796%, NOK 5.636%). Net of the USD credit forgone that is
+    # ~1.64% of NAV a year on a half-European $50k book; sweeping costs ~0.29%.
+    #
+    # $500 is a deliberately FLAT threshold. The true break-even is rate-dependent — at a
+    # one-month hold it is $426 for NOK, $459 GBP, $500 DKK, $649 EUR, $761 SEK and $1,600 for
+    # CHF — so $500 is below break-even for EUR, SEK and especially CHF on a ONE-MONTH view.
+    # It is still right, for two reasons. Sweeping nets the AGGREGATE balance, not a position,
+    # so what gets converted persists for as long as any exposure to that currency does, not
+    # 21 days; at a three-month horizon every break-even here falls under $535. And a
+    # per-currency threshold table would need maintaining against floating benchmark rates to
+    # save a few dollars a year. Raise it if the FX commission is not IB's $2 — LYNX marks
+    # this up, and it is the input the whole calculation is most sensitive to.
+    fx_sweep_min_usd: float = 500.0
+    fx_sweep: bool = True
+
+
+def plan_fx_sweep(balances: dict[str, float], fx: dict[str, float],
+                  min_usd: float = 500.0) -> dict[str, float]:
+    """{ccy: units to trade} to net every non-USD cash balance to zero.
+
+    Positive = acquire that currency (covering a short financed at the debit rate); negative =
+    sell an idle foreign balance back to USD. Balances worth less than `min_usd` are left
+    alone so the $2 FX commission never dominates the interest it saves.
+
+    Pure function of (balances, rates) so the POLICY is testable without a broker: the sweep
+    places real orders, and a bug here spends money rather than merely mis-reporting.
+    """
+    plan: dict[str, float] = {}
+    for ccy, bal in balances.items():
+        if ccy == "USD" or not bal:
+            continue
+        rate = fx.get(ccy)
+        # An unknown rate means the USD size of this balance is unknown, so the threshold
+        # cannot be applied. Skipping is the safe direction: not sweeping costs interest,
+        # sweeping the wrong size trades real money.
+        if not rate or rate <= 0 or not np.isfinite(rate):
+            logging.warning("fx sweep: no rate for %s, balance %.2f left unswept", ccy, bal)
+            continue
+        if abs(bal * rate) < min_usd:
+            continue
+        plan[ccy] = -bal          # trade the negative of the balance to reach zero
+    return plan
+
+
+def run_fx_sweep(broker, balances: dict[str, float], fx: dict[str, float],
+                 cfg: PaperConfig) -> list[tuple[str, float, str]]:
+    """Execute `plan_fx_sweep`. Returns [(ccy, units, status)] for the report."""
+    if not cfg.fx_sweep:
+        return []
+    if not balances:
+        # Distinguishes "cannot read balances" from "nothing to sweep": cash_balances()
+        # returns {} on failure AND in dry-run, and silently doing nothing on a live failure
+        # would let the interest accrue unnoticed.
+        logging.info("fx sweep: no balances available (dry-run or account read failed)")
+        return []
+    out = []
+    for ccy, units in plan_fx_sweep(balances, fx, cfg.fx_sweep_min_usd).items():
+        res = broker.convert_fx(ccy, units, fx.get(ccy, 0.0))
+        out.append((ccy, units, res.get("status", "?")))
+    return out
 
 
 def _annual_vol(adj: pd.DataFrame, window: int) -> pd.Series:
@@ -307,7 +369,16 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
         logging.warning("risk guard rejected %d buy candidate(s) this run (e.g. %s)",
                         len(rejects), rejects[0])
 
+    # ---- FX cash sweep -------------------------------------------------------------------
+    # LAST, after every equity trade, so it nets the day's true end-state rather than
+    # converting for a buy and back for a sell. It deliberately does NOT run before the buy
+    # loop: a sweep that fired first would convert USD the buys then need back again.
+    swept = run_fx_sweep(broker, broker.cash_balances() if hasattr(broker, "cash_balances")
+                         else {}, fx, cfg)
+    if swept:
+        logging.info("fx sweep: %s", ", ".join(f"{c} {u:+,.0f} ({s})" for c, u, s in swept))
+
     logging.info("Daily %s: %d bought, %d sold, %d held-through (gross %.2f)",
                  today, len(buys), len(sells), len(holds), gross)
     return {"date": today, "buys": buys, "sells": sells, "holds": holds,
-            "gross_scalar": gross, "marks": marks}
+            "gross_scalar": gross, "marks": marks, "fx_sweep": swept}

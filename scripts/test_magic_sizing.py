@@ -351,6 +351,123 @@ expect("INVARIANT: a stale price does NOT block the SELL of that position",
        Check(any(t == "FROZEN" for _, t, _ in _sells), f"{_sells}"))
 
 
+
+
+# ---------------------------------------------------------------------------------------
+# FX CASH SWEEP
+# ---------------------------------------------------------------------------------------
+# IB does not auto-convert, so a European buy leaves a NEGATIVE balance in that currency
+# financed at the first-tier debit rate (IBKR UK 2026-08-28: EUR 3.697% ... NOK 5.636%). Left
+# alone that is ~1.64% of NAV a year on a half-European $50k book. `plan_fx_sweep` decides what
+# to convert; it is a pure function precisely so this policy can be tested without a broker,
+# because unlike a mis-report a bug here SPENDS MONEY.
+print("\n" + "=" * 92)
+print("FX CASH SWEEP")
+print("=" * 92)
+
+from paper.orchestrator import plan_fx_sweep  # noqa: E402
+
+_FX = {"EUR": 1.16, "GBP": 1.35, "CHF": 1.24, "SEK": 0.104, "DKK": 0.155,
+       "NOK": 0.107, "USD": 1.0}
+
+# The core case: a short balance from financing a European buy is covered.
+_p = plan_fx_sweep({"USD": 25_000.0, "EUR": -12_000.0}, _FX)
+expect("short EUR balance is swept to zero", close(_p.get("EUR", 0.0), 12_000.0, 1e-6))
+expect("USD is never itself swept", Check("USD" not in _p, str(_p)))
+
+# Direction: an IDLE foreign balance (e.g. after a sell) goes back to USD, not further out.
+_p = plan_fx_sweep({"GBP": 4_000.0}, _FX)
+expect("idle long GBP is sold back to USD", close(_p.get("GBP", 0.0), -4_000.0, 1e-6))
+
+# The threshold is on USD VALUE, not on units — the whole point of currencies like SEK and
+# NOK, where 4,000 units is ~$420 and 40,000 units is ~$4,200.
+_p = plan_fx_sweep({"SEK": -4_000.0}, _FX)           # ~$416
+expect("sub-threshold balance left alone (USD value, not units)", Check("SEK" not in _p, str(_p)))
+_p = plan_fx_sweep({"SEK": -40_000.0}, _FX)          # ~$4,160
+expect("above-threshold SEK IS swept", close(_p.get("SEK", 0.0), 40_000.0, 1e-6))
+
+# REGRESSION GUARD: threshold must be symmetric, or idle long balances accumulate untouched.
+_p = plan_fx_sweep({"NOK": 40_000.0}, _FX)           # ~$4,280 long
+expect("threshold applies to LONG balances too", close(_p.get("NOK", 0.0), -40_000.0, 1e-6))
+
+# An unknown/absent rate must SKIP, never sweep a guessed size. Not sweeping costs interest;
+# sweeping the wrong size trades real money in the wrong amount.
+_p = plan_fx_sweep({"JPY": -900_000.0}, _FX)
+expect("unknown-rate currency is skipped, not guessed", Check("JPY" not in _p, str(_p)))
+_p = plan_fx_sweep({"EUR": -12_000.0}, {"EUR": float("nan")})
+expect("NaN rate is skipped", Check("EUR" not in _p, str(_p)))
+_p = plan_fx_sweep({"EUR": -12_000.0}, {"EUR": 0.0})
+expect("zero rate is skipped", Check("EUR" not in _p, str(_p)))
+
+# Multi-currency: each is decided on its own USD value, independently.
+_p = plan_fx_sweep({"USD": 30_000.0, "EUR": -16_000.0, "GBP": -5_000.0,
+                    "CHF": -300.0, "NOK": -1_000.0}, _FX)
+expect("EUR swept", close(_p.get("EUR", 0.0), 16_000.0, 1e-6))
+expect("GBP swept", close(_p.get("GBP", 0.0), 5_000.0, 1e-6))
+expect("tiny CHF (~$372) left alone", Check("CHF" not in _p, str(_p)))
+expect("NOK ~$107 left alone", Check("NOK" not in _p, str(_p)))
+
+# Zero and empty are no-ops rather than zero-size orders.
+expect("zero balance produces no order", Check("EUR" not in plan_fx_sweep({"EUR": 0.0}, _FX)))
+expect("empty balances produce an empty plan", Check(plan_fx_sweep({}, _FX) == {}))
+
+# The threshold is configurable, and raising it must actually suppress a sweep — this is the
+# knob to turn if the FX commission is not IB's $2 (LYNX marks it up).
+_p = plan_fx_sweep({"EUR": -1_000.0}, _FX, min_usd=500.0)
+expect("EUR ~$1,160 swept at the $500 default", close(_p.get("EUR", 0.0), 1_000.0, 1e-6))
+_p = plan_fx_sweep({"EUR": -1_000.0}, _FX, min_usd=5_000.0)
+expect("same balance suppressed by a raised threshold", Check("EUR" not in _p, str(_p)))
+
+# The plan must net to zero: applying it leaves no residual financing charge.
+_bal = {"EUR": -16_000.0, "GBP": 5_000.0}
+_p = plan_fx_sweep(_bal, _FX)
+_resid = {c: _bal[c] + _p.get(c, 0.0) for c in _bal}
+expect("applying the plan leaves every swept balance at zero",
+       Check(all(abs(v) < 1e-6 for v in _resid.values()), str(_resid)))
+
+# ORDER DIRECTION. The highest-consequence code in the sweep: IB expresses an FX order in the
+# PAIR'S BASE currency, and quotes minor currencies with USD as base (USDCHF) but majors the
+# other way (EURUSD). Getting it backwards does not fail loudly — it DOUBLES the exposure it
+# was meant to close. Hence a pure function, tested in all four combinations.
+from paper.broker import FX_PAIRS, fx_order_spec  # noqa: E402
+
+# ccy-as-base (EURUSD, GBPUSD): quantity is in the foreign currency, direction is natural.
+expect("cover short EUR -> BUY EURUSD in EUR",
+       Check(fx_order_spec("EUR", 12_000, 1.16) == ("EURUSD", "BUY", 12_000),
+             str(fx_order_spec("EUR", 12_000, 1.16))))
+expect("sell long EUR -> SELL EURUSD in EUR",
+       Check(fx_order_spec("EUR", -12_000, 1.16) == ("EURUSD", "SELL", 12_000),
+             str(fx_order_spec("EUR", -12_000, 1.16))))
+expect("cover short GBP -> BUY GBPUSD in GBP",
+       Check(fx_order_spec("GBP", 5_000, 1.35) == ("GBPUSD", "BUY", 5_000),
+             str(fx_order_spec("GBP", 5_000, 1.35))))
+
+# USD-as-base (USDCHF, USDSEK, USDDKK, USDNOK): direction INVERTS and the quantity is USD.
+expect("cover short CHF -> SELL USDCHF, sized in USD",
+       Check(fx_order_spec("CHF", 4_000, 1.24) == ("USDCHF", "SELL", 4_960),
+             str(fx_order_spec("CHF", 4_000, 1.24))))
+expect("sell long CHF -> BUY USDCHF, sized in USD",
+       Check(fx_order_spec("CHF", -4_000, 1.24) == ("USDCHF", "BUY", 4_960),
+             str(fx_order_spec("CHF", -4_000, 1.24))))
+expect("cover short SEK -> SELL USDSEK, sized in USD (not SEK units)",
+       Check(fx_order_spec("SEK", 40_000, 0.104) == ("USDSEK", "SELL", 4_160),
+             str(fx_order_spec("SEK", 40_000, 0.104))))
+
+# REGRESSION: the two conventions must not collapse to the same direction. If a refactor drops
+# the ccy_is_base flag, EUR and CHF shorts would both map to BUY and one of them would be wrong.
+expect("the two pair conventions give OPPOSITE actions for the same sign",
+       Check(fx_order_spec("EUR", 1_000, 1.16)[1] != fx_order_spec("CHF", 1_000, 1.24)[1]))
+
+# An unmapped currency yields a zero quantity, which convert_fx refuses — never a guessed pair.
+expect("unmapped currency yields no order", Check(fx_order_spec("JPY", 900_000, 0.0068)[2] == 0))
+expect("every FX_PAIRS entry contains USD",
+       Check(all("USD" in p for p, _ in FX_PAIRS.values()), str(FX_PAIRS)))
+expect("every swept currency in SUFFIX_MAP has an FX pair",
+       Check({c for c, _ in __import__("paper.broker", fromlist=["x"]).SUFFIX_MAP.values()}
+             - {"USD"} <= set(FX_PAIRS),
+             str({c for c, _ in __import__("paper.broker", fromlist=["x"]).SUFFIX_MAP.values()})))
+
+
 print("\n" + "=" * 92)
 if fails:
     print(f"{len(fails)} FAILURE(S) of {ran}:")
