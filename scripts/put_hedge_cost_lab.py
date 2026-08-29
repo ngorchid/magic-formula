@@ -102,7 +102,7 @@ def run_hedge(puts: pd.DataFrame, spot: pd.Series, book: pd.Series,
     cal = book.index
     hedge = pd.Series(0.0, index=cal)
     traded = {d: g for d, g in puts.groupby("date", sort=False)}
-    rolls, costs, pays = 0, [], []
+    rolls, costs, pays, per_roll = 0, [], [], []
     peak = float(spot.iloc[0])
     tol = max(30, horizon * 0.15)
     i = 0
@@ -147,6 +147,7 @@ def run_hedge(puts: pd.DataFrame, spot: pd.Series, book: pd.Series,
         hedge.loc[win] += v.diff().fillna(0.0) / s0 * BETA
         costs.append(prem / s0 * BETA)
         pays.append(settle / s0 * BETA)
+        per_roll.append({"roll": t, "prem": prem / s0 * BETA, "pay": settle / s0 * BETA})
         rolls += 1
         i = j if j > i else i + 1
     years = (cal[-1] - cal[0]).days / 365.25
@@ -154,6 +155,7 @@ def run_hedge(puts: pd.DataFrame, spot: pd.Series, book: pd.Series,
             "cost_yr": float(np.sum(costs) / years),
             "payoff_yr": float(np.sum(pays) / years),
             "net_yr": float((np.sum(pays) - np.sum(costs)) / years),
+            "per_roll": per_roll,
             "hedged": book + hedge}
 
 
@@ -280,6 +282,27 @@ def main() -> None:
               f"{gg.cost_yr.mean():9.2%} {gg.payoff_yr.mean():10.2%} {gg.net_yr.mean():+9.2%} "
               f"{gg.net_yr.quantile(.1):+8.2%}..{gg.net_yr.quantile(.9):+.2%}")
     print("\n  cost/roll rises with maturity (sqrt-of-time); cost/YR is the theta question.")
+
+    print("\n" + "=" * 104)
+    print("IS THE PAYOFF AN EXPECTATION, OR ONE LUCKY ROLL? (10% cap, reset, quarterly)")
+    print("=" * 104)
+    r = run_hedge(puts, spot, book, 0.10, 91, anchor="reset", marks=marks)
+    per = pd.DataFrame(r["per_roll"])
+    n0 = int((per.pay == 0).sum())
+    print(f"  rolls expiring worthless        {n0} of {len(per)}  ({n0 / len(per):.0%})")
+    print(f"  total premium paid              {per.prem.sum():.1%} of NAV")
+    print(f"  total settlements               {per.pay.sum():.1%} of NAV")
+    top3 = per.nlargest(3, "pay")
+    print(f"  share of settlements, top 3     {top3.pay.sum() / max(per.pay.sum(), 1e-9):.0%}")
+    print("\n  largest payoffs:")
+    for _, x in per.nlargest(4, "pay").iterrows():
+        print(f"    {x['roll'].date()}  premium {x['prem']:6.2%}  payoff {x['pay']:7.2%}")
+    yrs = len(per) / 4
+    print(f"\n  EX the single best roll: payoff/yr {(per.pay.sum() - per.pay.max()) / yrs:.2%}"
+          f"   net/yr {(per.pay.sum() - per.pay.max() - per.prem.sum()) / yrs:+.2%}")
+    print("  -> compare to the +3.56%/yr market-neutral alpha this is meant to protect.")
+    print("  A 13.5-year sample contains ONE COVID, and every crash in it was FAST -- exactly")
+    print("  the shape a quarterly put catches. The headline net cost is not an expectation.")
 
     out = ROOT / "results" / "put_hedge"
     out.mkdir(parents=True, exist_ok=True)
