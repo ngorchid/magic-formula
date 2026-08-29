@@ -118,6 +118,61 @@ def run_hedge(puts: pd.DataFrame, spot: pd.Series, book: pd.Series,
             "hedged": hedged}
 
 
+def cohort_study(puts: pd.DataFrame, spot: pd.Series, book: pd.Series, cap: float,
+                 horizons=(63, 91, 182, 365, 730), step: int = 42) -> pd.DataFrame:
+    """Does a LONGER-dated put cost less per year? Measured across overlapping cohorts.
+
+    Premium scales roughly as sqrt(T), so four 3-month puts should cost about twice one
+    12-month put -- less theta per year of protection. That is a claim about COST, which is
+    observed at purchase and measured precisely.
+
+    PAYOFF is a different matter and is why the single-chain result was misleading. It is
+    path-dependent and realised only at expiry: a market that falls 30% mid-year and recovers
+    pays a quarterly holder and pays an annual holder NOTHING. With a 13.4-year sample a single
+    2-year chain gives ~7 observations, so its payoff is a timing lottery, not an estimate.
+    Starting a fresh chain every `step` trading days and averaging across the resulting
+    overlapping cohorts removes that dependence on one arbitrary start date. Cohorts overlap,
+    so the SPREAD across them describes start-date sensitivity, not independent samples.
+    """
+    by_date = {d: g for d, g in puts.groupby("date", sort=False)}
+    cal = book.index
+    rows = []
+    for h in horizons:
+        tol = max(30, h * 0.15)
+        for start in range(0, len(cal) - 252, step):
+            costs, payoffs, i, nroll = [], [], start, 0
+            while i < len(cal):
+                t = cal[i]
+                s0 = spot.get(t, np.nan)
+                day = by_date.get(t)
+                if not np.isfinite(s0) or day is None or day.empty:
+                    i += 1
+                    continue
+                err = (day.dte - h).abs()
+                if err.min() > tol:
+                    i += 1
+                    continue
+                exp_pick = day.loc[err.idxmin(), "expiry"]
+                chain = day[day.expiry == exp_pick]
+                pick = chain.loc[(chain.strike - s0 * (1 - cap / BETA)).abs().idxmin()]
+                prem, K, exp = float(pick.close), float(pick.strike), pd.Timestamp(pick.expiry)
+                costs.append(prem / s0 * BETA)
+                j = min(int(cal.searchsorted(exp)), len(cal) - 1)
+                s_t = spot.iloc[j]
+                if np.isfinite(s_t):
+                    payoffs.append(max(0.0, K - s_t) / s0 * BETA)
+                nroll += 1
+                i = j if j > i else i + 1
+            if nroll < 2:
+                continue
+            yrs = (cal[-1] - cal[start]).days / 365.25
+            rows.append({"horizon": h, "start": cal[start], "rolls": nroll,
+                         "cost_yr": sum(costs) / yrs, "payoff_yr": sum(payoffs) / yrs,
+                         "net_yr": (sum(payoffs) - sum(costs)) / yrs,
+                         "cost_per_roll": float(np.mean(costs))})
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     book = pd.read_csv(BOOK, index_col=0, parse_dates=True)["net_return"]
     book = book.loc["2013-04-01":]                 # OPRA coverage starts here
@@ -167,9 +222,23 @@ def main() -> None:
         c = df[(df["cap"] == cap) & (df["horizon"] == 91)].iloc[0]["cost_yr"]
         print(f"    cap {cap:.0%}: costs {c:.2%}/yr = {c / 0.0356:.1f}x the entire alpha")
 
+    print("\n" + "=" * 104)
+    print("DOES A LONGER-DATED PUT COST LESS? (cap 10%, overlapping cohorts every 42 days)")
+    print("=" * 104)
+    ch = cohort_study(puts, spot, book, cap=0.10)
+    g = ch.groupby("horizon")
+    print(f"  {'horizon':>8s} {'cohorts':>8s} {'rolls':>6s} {'cost/roll':>10s} {'cost/yr':>9s} "
+          f"{'payoff/yr':>10s} {'net/yr':>9s} {'net p10..p90':>18s}")
+    for h, gg in g:
+        print(f"  {h:6d}d {len(gg):8d} {gg.rolls.mean():6.1f} {gg.cost_per_roll.mean():10.2%} "
+              f"{gg.cost_yr.mean():9.2%} {gg.payoff_yr.mean():10.2%} {gg.net_yr.mean():+9.2%} "
+              f"{gg.net_yr.quantile(.1):+8.2%}..{gg.net_yr.quantile(.9):+.2%}")
+    print("\n  cost/roll rises with maturity (sqrt-of-time); cost/YR is the theta question.")
+
     out = ROOT / "results" / "put_hedge"
     out.mkdir(parents=True, exist_ok=True)
     df.to_csv(out / "cost.csv", index=False)
+    ch.to_csv(out / "cohorts.csv", index=False)
     print(f"\n  wrote {out}/cost.csv")
 
 
