@@ -85,6 +85,15 @@ MUTATIONS = [
 # exposure it was meant to close.
 BROKER = ROOT / "paper" / "broker.py"
 MUTATIONS += [
+    # THIS ONE SHIPPED. The 2026-08-28 unit-check insertion dropped the `if cfg.use_risk_guard:`
+    # line, so the whole risk-guard block was absorbed into the `ccy != USD` branch and every US
+    # buy -- the bulk of the book -- reached the broker unguarded. It reached `live`. The suite
+    # passed throughout, because the only USD case asserted that US names still BUY, which is
+    # exactly what the broken code did. Fixed in 69696d7.
+    ("            if cfg.use_risk_guard:\n                lim = RiskLimits.for_equities",
+     "            if cfg.use_risk_guard and ccy.get(t, \"USD\") != \"USD\":\n"
+     "                lim = RiskLimits.for_equities",
+     "risk guard runs only for FOREIGN names (the bug that shipped)"),
     ("    return (1.0 / tol) <= r <= tol",
      "    return True",
      "unit guard always passes (100x LSE pence/pounds trap goes through)"),
