@@ -375,6 +375,12 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                     logging.error(msg)
                     rejects.append(msg)
                     continue
+            # Independent pre-trade guard — runs for EVERY name, not just non-USD. It was briefly
+            # nested inside the unit-check branch above (2026-08-28 refactor), which silently let
+            # US-equity buys — the bulk of the book — reach the broker unguarded. The guard is the
+            # second line of defence against the strategy's own sizing bug and must not depend on
+            # currency; keep it under use_risk_guard at the loop level.
+            if cfg.use_risk_guard:
                 lim = RiskLimits.for_equities(state.nav(marks, fx) or cfg.budget)
                 ok_px = price_sane(t, price_local, priors.get(t), lim)
                 if not ok_px:

@@ -546,6 +546,27 @@ _buys_usd = [o for o in _run_ccy(_px, _rank, _empty3, factor=0.01, ccy="USD",
                                  hold_n=12, top_n=10) if o[0] == "BUY"]
 expect("USD names are NOT gated by the unit guard", Check(len(_buys_usd) > 0, f"{_buys_usd}"))
 
+# INTEGRATION: the RISK guard (check_order/price_sane) — a DIFFERENT guard from the unit check —
+# must also be wired into the buy loop for US names. A 2026-08-28 refactor nested it inside the
+# `ccy != USD` branch, so US buys (the bulk of the book) reached the broker with no pre-trade
+# check and use_risk_guard became dead. The USD unit-guard case above could not catch it: it only
+# asserts the UNIT check leaves USD alone. This asserts the SIZE check BITES on a US name — at
+# top_n=3 a single order is 33% of budget, over check_order's 15% single-order cap, so a guarded
+# USD buy is rejected. factor=1.0 so the unit guard is a no-op and only the risk guard can reject.
+_empty4 = book(50_000.0, {})
+_buys_capped = [o for o in _run_ccy(_px, _rank, _empty4, factor=1.0, ccy="USD",
+                                    hold_n=12, top_n=3) if o[0] == "BUY"]
+expect("US buy over the 15% single-order cap is REJECTED by the wired risk guard",
+       Check(len(_buys_capped) == 0, f"{_buys_capped}"))
+# The mutation-killer: the SAME oversized order DOES reach the broker with the guard OFF, proving
+# the rejection above is the guard doing its job (not the sizer quietly shrinking the order) and
+# that use_risk_guard is live again rather than dead. Under the nesting bug BOTH arms showed buys.
+_empty5 = book(50_000.0, {})
+_buys_noguard = [o for o in _run_ccy(_px, _rank, _empty5, factor=1.0, ccy="USD",
+                                     hold_n=12, top_n=3, use_risk_guard=False) if o[0] == "BUY"]
+expect("...and the SAME US order reaches the broker when use_risk_guard=False",
+       Check(len(_buys_noguard) > 0, f"{_buys_noguard}"))
+
 print("\n" + "=" * 92)
 if fails:
     print(f"{len(fails)} FAILURE(S) of {ran}:")
