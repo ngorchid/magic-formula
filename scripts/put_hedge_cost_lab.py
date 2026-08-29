@@ -77,9 +77,15 @@ def run_hedge(puts: pd.DataFrame, spot: pd.Series, book: pd.Series,
        struck 9.1% below the NEW, lower level: the floor ratchets down and the book keeps
        eating up to a cap's worth per quarter. That is a rolling one-quarter beta hedge, and
        it is NOT what "limit losses to X%" means.
-       "hwm" prices K off the running PEAK, which is the literal reading of a loss cap. It
-       costs roughly TWICE as much (a put struck above spot after a fall is at- or in-the-
-       money) and measurably does NOT deliver a better outcome -- see main().
+       "hwm" prices K off the running PEAK, the literal reading of a loss cap. It keeps
+       buying puts struck ABOVE spot after a fall, i.e. IN THE MONEY -- which is not insurance
+       at all but a partly directional short: you pay intrinsic and lose it if the market
+       recovers. A strawman for the idea, kept only for comparison.
+       "hwm_atm" is the repaired version and the one to judge the concept on: anchored to the
+       peak but NEVER in the money, `K = min(peak x (1 - X/beta), spot)` with a hard filter to
+       strikes at or below spot. If a 90 put has already paid out with spot at 80, an 80 put
+       captures any further fall just as well and costs far less. Measured at 0% ITM against
+       11-17% for raw "hwm".
 
     2. MARK TO MARKET. An earlier version charged the whole premium on the roll date and
        credited the payoff on the expiry date, with NOTHING in between -- so a put contributed
@@ -115,8 +121,16 @@ def run_hedge(puts: pd.DataFrame, spot: pd.Series, book: pd.Series,
             continue
         exp_pick = day.loc[err.idxmin(), "expiry"]
         chain = day[day.expiry == exp_pick]
-        base = s0 if anchor == "reset" else peak
-        pick = chain.loc[(chain.strike - base * (1.0 - mkt_fall)).abs().idxmin()]
+        if anchor == "reset":
+            target, cand = s0 * (1.0 - mkt_fall), chain
+        elif anchor == "hwm":
+            target, cand = peak * (1.0 - mkt_fall), chain
+        else:                                   # hwm_atm — peak-anchored but never ITM
+            target = min(peak * (1.0 - mkt_fall), s0)
+            cand = chain[chain.strike <= s0]
+            if cand.empty:
+                cand = chain
+        pick = cand.loc[(cand.strike - target).abs().idxmin()]
         prem, K, exp = float(pick.close), float(pick.strike), pd.Timestamp(pick.expiry)
         j = min(int(cal.searchsorted(exp)), len(cal) - 1)
         settle = max(0.0, K - float(spot.iloc[j]))
@@ -220,18 +234,18 @@ def main() -> None:
     print("=" * 104)
     print(f"  UNHEDGED: return {base['ann_return']:+.2%}  vol {base['ann_vol']:.2%}  "
           f"Sharpe {base['sharpe']:+.2f}  maxDD {base['max_drawdown']:+.1%}\n")
-    print(f"  {'cap':>5s} {'anchor':>7s} {'strike':>8s} {'cost/yr':>9s} {'payoff/yr':>10s} "
+    print(f"  {'cap':>5s} {'anchor':>9s} {'strike':>8s} {'cost/yr':>9s} {'payoff/yr':>10s} "
           f"{'net/yr':>8s} | {'return':>8s} {'vol':>7s} {'Sharpe':>7s} {'maxDD':>8s}")
     rows = []
     for cap in CAPS:
-        for name in ("reset", "hwm"):
+        for name in ("reset", "hwm", "hwm_atm"):
             h = 91
             r = run_hedge(puts, spot, book, cap, h, anchor=name, marks=marks)
             s = summary_stats(r["hedged"])
             rows.append({**{k: v for k, v in r.items() if k != "hedged"},
                          "return": s["ann_return"], "vol": s["ann_vol"],
                          "sharpe": s["sharpe"], "maxdd": s["max_drawdown"]})
-            print(f"  {cap:5.0%} {name:>7s} {1 - cap / BETA:7.1%} {r['cost_yr']:9.2%} "
+            print(f"  {cap:5.0%} {name:>9s} {1 - cap / BETA:7.1%} {r['cost_yr']:9.2%} "
                   f"{r['payoff_yr']:10.2%} {r['net_yr']:+8.2%} | {s['ann_return']:+8.2%} "
                   f"{s['ann_vol']:7.2%} {s['sharpe']:+7.2f} {s['max_drawdown']:+8.1%}")
 
