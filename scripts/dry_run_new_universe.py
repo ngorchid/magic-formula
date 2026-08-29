@@ -120,8 +120,20 @@ def main() -> None:
     print(f"  smallest 5 eligible:    " +
           ", ".join(f"{t} ${v / 1e9:,.2f}bn"
                     for t, v in mc[mc.index.isin(rank_new.index)].tail(5).items()))
-    absurd = mc[mc > 5e12]
-    print(f"  above $5tn (impossible today): {list(absurd.index) or 'none'}")
+    # Only NON-USD names can be corrupted by an FX or units error — a USD name is converted at
+    # 1.0 and cannot move. The first version flagged everything above $5tn and duly reported
+    # NVDA, which is simply a $5.25tn company in USD; a check that fires on the correct answer
+    # trains you to ignore it. Restricting to non-USD names is what makes this diagnostic.
+    ccy_map = panels["currency"]
+    foreign = mc[[t for t in mc.index if ccy_map.get(t, "USD") != "USD"]]
+    biggest_usd = mc[[t for t in mc.index if ccy_map.get(t, "USD") == "USD"]].max()
+    absurd = foreign[foreign > biggest_usd]
+    print(f"  largest US name ${biggest_usd / 1e9:,.0f}bn — any FOREIGN name above it is suspect")
+    print(f"  foreign names above it: {list(absurd.index) or 'none'}")
+    pence = mc[[t for t in mc.index if ccy_map.get(t) == 'GBp']]
+    if len(pence):
+        print(f"  largest .L (pence-quoted): {pence.index[0]} ${pence.iloc[0] / 1e9:,.0f}bn "
+              f"— a 100x error here would read in the tens of trillions")
     gbp = [t for t in rank_new.index[:TOP_N] if t.endswith(".L")]
     print(f"  .L names in the top {TOP_N}: {gbp or 'none'}"
           f"{'  <-- verify units before live (scripts/check_ib_price_units.py)' if gbp else ''}")
