@@ -85,6 +85,15 @@ MUTATIONS = [
 # exposure it was meant to close.
 BROKER = ROOT / "paper" / "broker.py"
 MUTATIONS += [
+    ("    var = float(w @ (D @ R @ D) @ w)",
+     "    var = float(np.sum((w * np.diag(D)) ** 2))",
+     "covariance ignored (back to the independence assumption)"),
+    ("        est_book_vol = med * cfg.diversification",
+     "        est_book_vol = med",
+     "diversification factor dropped from the fallback"),
+    ("    if est_book_vol is None or est_book_vol <= 0:",
+     "    if True:",
+     "covariance estimate computed then discarded"),
     # THIS ONE SHIPPED. The 2026-08-28 unit-check insertion dropped the `if cfg.use_risk_guard:`
     # line, so the whole risk-guard block was absorbed into the `ccy != USD` branch and every US
     # buy -- the bulk of the book -- reached the broker unguarded. It reached `live`. The suite

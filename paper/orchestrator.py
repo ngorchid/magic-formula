@@ -33,6 +33,18 @@ class PaperConfig:
     max_new_buys_per_day: int = 1
     vol_target: float = 0.25   # annualized portfolio vol target
     vol_window: int = 63       # days for per-name realised vol
+    # Covariance vol-targeting, ported from the trend overlay 2026-08-29. Correlations are more
+    # stable than vols, so they get a longer window; corr_weight is the weight on the SAMPLE
+    # correlation, the remainder going to a constant-correlation target. The trend repo measured
+    # near-raw sample correlation (0.90) to beat heavy shrinkage, monotone in corr_weight and
+    # holding in both sub-periods. Sigma is only ever used as a quadratic form (w' Sigma w) and
+    # never inverted, so it does not need to be well-conditioned.
+    corr_window: int = 252
+    corr_weight: float = 0.90
+    # Fallback only: book vol ~ median constituent vol x this, used when there is too little
+    # history to form a correlation matrix. Measured mean over 2012-2026 is 0.628, but it
+    # reaches 0.864 in March 2020 -- which is precisely why the covariance estimate exists.
+    diversification: float = 0.60
     # EQUAL WEIGHT as of 2026-08-28: (1.0, 1.0) makes every tilt exactly 1.0, so the code
     # path stays intact and this is reversible by editing one line. Measured on the deployed
     # factor set, at the LIVE $50k book size with IB's $1.00/order floor, inverse-vol tilting
@@ -245,13 +257,62 @@ def _size_shares(ticker: str, price_local: float, fx: float, tilts: pd.Series,
     return int(target_usd // denom)
 
 
-def _gross_scalar(vol: pd.Series, cfg: PaperConfig) -> float:
-    """Portfolio vol-target factor (approx): scale gross so est book vol ≈ target.
-    Book vol ≈ median constituent vol × ~0.6 diversification. Clipped to ≤1 (no leverage)."""
+def _book_vol(rets: pd.DataFrame, names: list[str], vol: pd.Series,
+              cfg: PaperConfig) -> float | None:
+    """Annualised book vol from the covariance: sqrt(w' Sigma w), Sigma = D R D.
+
+    Ported from `trend_overlay/execution.py` 2026-08-29. The previous estimate,
+    `median constituent vol x 0.60`, uses a CONSTANT for diversification, and a constant cannot
+    see correlations rising. Measured over 2012-2026 the true ratio of book vol to median
+    constituent vol averages 0.628 -- so 0.60 is fine on average -- but it reaches **0.864 in
+    March 2020**, where actual book vol ran ~44% above the estimate and the target therefore
+    admitted far more risk than intended at exactly the peak. That is the same defect the trend
+    overlay carried until 2026-08-08, where assuming uncorrelated markets left realised vol at
+    12-14% against a 10% target.
+
+    Equal weights, because that is what the sleeve now deploys (`inv_vol_clip` pinned to
+    (1.0, 1.0) since 2026-08-28). Returns None when there is too little history or the matrix is
+    unusable, so the caller can fall back rather than size off a bad number.
+    """
+    names = [t for t in names if t in rets.columns and t in vol.index]
+    n = len(names)
+    if n < 2 or not cfg.corr_weight:
+        return None
+    win = rets[names].tail(cfg.corr_window).dropna(how="all")
+    if len(win) < cfg.corr_window:
+        return None
+    v = np.nan_to_num(vol.reindex(names).values.astype(float))
+    if not np.isfinite(v).all() or (v <= 0).all():
+        return None
+    R = win.corr().values
+    if R.shape != (n, n) or not np.isfinite(R).all():
+        return None
+    off = ~np.eye(n, dtype=bool)
+    target = np.full((n, n), float(R[off].mean()))     # constant-correlation target
+    np.fill_diagonal(target, 1.0)
+    R = cfg.corr_weight * R + (1.0 - cfg.corr_weight) * target
+    w = np.repeat(1.0 / n, n)
+    D = np.diag(v)
+    var = float(w @ (D @ R @ D) @ w)
+    return float(np.sqrt(var)) if var > 0 else None
+
+
+def _gross_scalar(vol: pd.Series, cfg: PaperConfig, rets: pd.DataFrame | None = None,
+                  names: list[str] | None = None) -> float:
+    """Portfolio vol-target factor: scale gross so estimated book vol ≈ target.
+
+    Prefers the COVARIANCE estimate (see `_book_vol`); falls back to
+    `median constituent vol x cfg.diversification` when history is too short to form a
+    correlation matrix. Clipped to ≤1, so it can only de-risk and never levers up.
+    """
     med = float(np.nanmedian(vol.values)) if len(vol) else np.nan
     if not med or med != med:
         return 1.0
-    est_book_vol = med * 0.6
+    est_book_vol = None
+    if rets is not None and names:
+        est_book_vol = _book_vol(rets, names, vol, cfg)
+    if est_book_vol is None or est_book_vol <= 0:
+        est_book_vol = med * cfg.diversification
     return float(np.clip(cfg.vol_target / est_book_vol, 0.0, 1.0))
 
 
@@ -262,7 +323,10 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     adj = panels["adj"]
     ccy = panels["currency"]
     vol = _annual_vol(adj, cfg.vol_window)
-    gross = _gross_scalar(vol, cfg)
+    # Estimate on the TARGET book (top_n by rank), not the whole candidate universe: the vol
+    # being targeted is the portfolio's, and the universe median is not the portfolio's median.
+    _target_names = [t for t in ranking.head(cfg.top_n).index if t in adj.columns]
+    gross = _gross_scalar(vol, cfg, rets=adj.pct_change(fill_method=None), names=_target_names)
     band = set(ranking.head(cfg.hold_n).index)          # names still "good enough" to hold
     marks = {t: float(adj[t].dropna().iloc[-1]) for t in adj.columns if adj[t].notna().any()}
     # PRIOR CLOSE for the price-sanity guard, taken from the SAME adjusted series as `marks`.

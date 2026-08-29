@@ -567,6 +567,96 @@ _buys_noguard = [o for o in _run_ccy(_px, _rank, _empty5, factor=1.0, ccy="USD",
 expect("...and the SAME US order reaches the broker when use_risk_guard=False",
        Check(len(_buys_noguard) > 0, f"{_buys_noguard}"))
 
+
+# ---------------------------------------------------------------------------------------
+# COVARIANCE VOL TARGET  (ported from trend_overlay 2026-08-29)
+# ---------------------------------------------------------------------------------------
+# The old estimate was `median vol of the WHOLE CANDIDATE UNIVERSE x 0.60`, which carried two
+# independent errors of similar size: it measured the wrong universe (the factor selects names
+# 1.08x more volatile than the universe median) and it used a constant for diversification
+# (true 0.638, and 0.864 in March 2020). Combined, it understated book vol by ~15%.
+from paper.orchestrator import _book_vol  # noqa: E402
+
+_n = 260
+_ci = pd.bdate_range(end=pd.Timestamp("2026-08-17"), periods=_n)
+_g = np.random.default_rng(4)
+
+def _panel(rho, sd=0.02, k=6):
+    """k assets with pairwise correlation rho and identical vol."""
+    common = _g.standard_normal(_n)
+    cols = {}
+    for j in range(k):
+        idio = _g.standard_normal(_n)
+        cols[f"A{j}"] = (np.sqrt(rho) * common + np.sqrt(1 - rho) * idio) * sd
+    return pd.DataFrame(cols, index=_ci)
+
+_names6 = [f"A{j}" for j in range(6)]
+_ann = lambda r: r.std() * np.sqrt(252)
+
+# INDEPENDENT assets: book vol ~ single vol / sqrt(n).
+_ind = _panel(0.0)
+_bv = _book_vol(_ind, _names6, _ann(_ind), CFG)
+_single = float(_ann(_ind).mean())
+expect("independent assets -> book vol ~ single/sqrt(6)",
+       Check(abs(_bv / (_single / np.sqrt(6)) - 1) < 0.35, f"{_bv:.4f} vs {_single/np.sqrt(6):.4f}"))
+
+# PERFECTLY correlated: book vol ~ the single-asset vol, no diversification at all.
+_per = _panel(0.999)
+_bvp = _book_vol(_per, _names6, _ann(_per), CFG)
+expect("perfectly correlated -> book vol ~ single asset vol",
+       Check(abs(_bvp / float(_ann(_per).mean()) - 1) < 0.15, f"{_bvp:.4f}"))
+
+# THE POINT OF THE PORT: more correlation must mean MORE estimated risk. The old constant-0.60
+# estimate is identical in both cases, which is exactly the defect.
+expect("higher correlation gives a HIGHER estimate (a constant cannot)",
+       Check(_bvp > _bv * 1.5, f"rho=0 {_bv:.4f} vs rho=1 {_bvp:.4f}"))
+
+# Fallbacks must return None so the caller can use the old estimate, never a bad number.
+expect("too little history -> None", Check(_book_vol(_ind.tail(50), _names6, _ann(_ind), CFG) is None))
+expect("single name -> None", Check(_book_vol(_ind, ["A0"], _ann(_ind), CFG) is None))
+expect("unknown names -> None", Check(_book_vol(_ind, ["ZZ", "YY"], _ann(_ind), CFG) is None))
+expect("corr_weight=0 disables it -> None",
+       Check(_book_vol(_ind, _names6, _ann(_ind), replace(CFG, corr_weight=0.0)) is None))
+
+# And the scalar must actually USE it, then clip.
+_lowvol = pd.Series(0.02, index=_names6)          # 2% annual vol -> target never binds
+expect("gross clips at 1.0 (never levers up)",
+       close(_gross_scalar(_lowvol, CFG, rets=_ind, names=_names6), 1.0, 1e-9))
+_hi = _panel(0.999, sd=0.05)
+_gh = _gross_scalar(_ann(_hi), CFG, rets=_hi, names=_names6)
+expect("high correlated vol -> gross well below 1", Check(_gh < 0.8, f"{_gh:.3f}"))
+# REGRESSION: with no returns supplied it must fall back to the median-based estimate, not fail.
+expect("falls back cleanly when no returns are given",
+       Check(0.0 < _gross_scalar(_ann(_hi), CFG) <= 1.0))
+
+# DISCRIMINATING CASES. The two above ("gross < 0.8", "falls back cleanly") pass whether or not
+# the covariance is used, and whether or not the fallback keeps its 0.60 factor — both mutations
+# survived on them. These pin the exact arithmetic of each path.
+_sd = 0.40 / np.sqrt(252)                      # ~40% annualised per name
+_corr = _panel(0.999, sd=_sd)                  # near-perfectly correlated: NO diversification
+_v = _ann(_corr)
+_med = float(np.nanmedian(_v.values))
+
+# With the covariance: book vol ~= the single-name vol, so gross ~= target / vol.
+_g_cov = _gross_scalar(_v, CFG, rets=_corr, names=_names6)
+expect("gross USES the covariance estimate (target / book vol)",
+       close(_g_cov, min(1.0, CFG.vol_target / _book_vol(_corr, _names6, _v, CFG)), 1e-9))
+
+# Without it: the fallback is median x 0.60, which on the SAME data is far more permissive —
+# it assumes diversification that does not exist here.
+_g_fb = _gross_scalar(_v, CFG)
+expect("fallback is exactly median x diversification",
+       close(_g_fb, min(1.0, CFG.vol_target / (_med * CFG.diversification)), 1e-9))
+expect("and the two paths DIFFER materially on correlated names",
+       Check(_g_cov < _g_fb - 0.05, f"cov {_g_cov:.3f} vs fallback {_g_fb:.3f}"))
+
+# The diversification constant must actually bind in the fallback: change it, change the answer.
+# A SMALLER diversification factor means a smaller estimated book vol, hence a LARGER gross.
+# The first version of this asserted the inequality the wrong way round and failed.
+expect("fallback responds to cfg.diversification (smaller factor -> larger gross)",
+       Check(_gross_scalar(_v, replace(CFG, diversification=0.30)) >
+             _gross_scalar(_v, replace(CFG, diversification=0.90)) + 1e-9))
+
 print("\n" + "=" * 92)
 if fails:
     print(f"{len(fails)} FAILURE(S) of {ran}:")
