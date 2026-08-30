@@ -159,7 +159,13 @@ EURO_INDEX_PAGES = {
     # for the incumbent five indices and 67% for the US control itself.
     "BEL 20": ("https://en.wikipedia.org/wiki/BEL_20", ".BR"),
     "OMX Helsinki 25": ("https://en.wikipedia.org/wiki/OMX_Helsinki_25", ".HE"),
-    "ISEQ 20": ("https://en.wikipedia.org/wiki/ISEQ_20", ".IR"),
+    # ISEQ 20 (.IR) REMOVED 2026-08-30. All 20 Irish names failed to qualify against live IB —
+    # not a symbol-format issue (they fail on the correct symbol and on Euronext Dublin's own
+    # exchange code ISED alike), so the account simply has no Dublin trading permission. Swept
+    # via scripts/ib_symbol_probe.py: 0/20 qualified. Keeping them only fed the "universe
+    # shrinking" alerts with 20 permanently-unresolvable names. RESTORE this line once Euronext
+    # Dublin market data + trading are enabled on the account, then re-run the probe to confirm.
+    # "ISEQ 20": ("https://en.wikipedia.org/wiki/ISEQ_20", ".IR"),
     "PSI": ("https://en.wikipedia.org/wiki/PSI-20", ".LS"),
     # VIENNA (.VI) IS DELIBERATELY ABSENT. Neither the English nor the German ATX article
     # carries a ticker/ISIN column -- the constituent table is Company/Industry/Sector only --

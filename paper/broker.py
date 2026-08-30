@@ -54,18 +54,26 @@ def ib_symbol_candidates(yf_ticker: str) -> list[str]:
     2026-08-30 against live IB, `VOLV-B.ST` / `NOVO-B.CO` / `RYA.IR` all failed with "no
     security definition found".
 
-    yfinance writes the class with a HYPHEN (VOLV-B); IB generally uses a SPACE (VOLV B), and
-    occasionally neither (VOLVB). 23 of the European names carry a hyphen — 22 Stockholm plus
-    BT-A.L — so this is not an edge case.
+    yfinance writes the class with a HYPHEN (VOLV-B). MEASURED against live IB 2026-08-30 by
+    sweeping all 32 hyphenated European names (scripts/ib_symbol_probe.py): IB uses a DOT for
+    the overwhelming majority — 29 of 32 (VOLV.B, ASSA.B, BT.A, MAERSK.B ...) — a SPACE for one
+    (NDA-FI.HE -> "NDA FI") and NO separator for two (NDA-SE.ST -> NDASE, ROCK-B.CO -> ROCKB).
+    IB never uses the hyphen. So the dot leads the candidate list, and all 32 resolve across the
+    four forms; the earlier order (which omitted the dot entirely) left every share class silent.
 
-    Rather than encode a convention I would be guessing at, `qualify` tries these in order and
-    keeps whichever IB accepts, logging the winner. Cases where the TICKER ITSELF differs
-    (Dublin lists Ryanair as RY4C, yfinance as RYA) cannot be derived and need `IB_SYMBOL_FIX`.
+    `qualify` tries these in order and keeps whichever IB accepts, logging the winner. Cases
+    where the TICKER ITSELF differs (not just its separator) cannot be derived and need
+    `IB_SYMBOL_FIX`. NB Euronext Dublin (.IR) resolves NONE of its 20 names — the account has no
+    Dublin permission — so that venue is dropped at the universe level (data/universe.py), not
+    patched here.
     """
     base, _, _ = ib_contract_spec(yf_ticker)
     fixed = IB_SYMBOL_FIX.get(yf_ticker)
     out = [fixed] if fixed else []
-    for cand in (base, base.replace("-", " "), base.replace("-", "")):
+    # Dot FIRST: it is IB's actual share-class convention, so for a hyphenated ticker it resolves
+    # on the first attempt instead of after a failed hyphen probe. For a name with no hyphen all
+    # four forms collapse to `base`, so plain and US tickers still yield exactly one candidate.
+    for cand in (base.replace("-", "."), base, base.replace("-", " "), base.replace("-", "")):
         if cand and cand not in out:
             out.append(cand)
     return out

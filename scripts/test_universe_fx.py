@@ -175,16 +175,19 @@ print("=" * 92)
 print("IB SYMBOL CANDIDATES — yfinance and IB disagree on share-class separators")
 print("=" * 92)
 
-# Measured against live IB 2026-08-30: VOLV-B.ST, NOVO-B.CO and RYA.IR all returned "no
-# security definition found". yfinance writes the class with a HYPHEN, IB generally with a
-# SPACE. The failure is SILENT — qualify() returns None, the order is refused, and the name
-# sits in the universe unable to ever trade. 23 European names carry a hyphen.
+# Measured against live IB 2026-08-30 by sweeping all 32 hyphenated European names: IB uses a
+# DOT for the share-class separator (VOLV.B), 29 of 32; a SPACE for one (NDA-FI -> "NDA FI") and
+# NONE for two (NDA-SE -> NDASE, ROCK-B -> ROCKB). It never uses the hyphen yfinance writes. The
+# old candidate list omitted the dot entirely, so every share class failed SILENTLY — qualify()
+# returned None, the order was refused, and the name sat in the universe unable to ever trade.
 from paper.broker import IB_SYMBOL_FIX, ib_symbol_candidates  # noqa: E402
 
 _c = ib_symbol_candidates("VOLV-B.ST")
-expect("hyphen ticker offers the SPACE form", "VOLV B" in _c, str(_c))
-expect("...and the concatenated form", "VOLVB" in _c, str(_c))
-expect("...with the yfinance form FIRST (most venues do agree)", _c[0] == "VOLV-B", str(_c))
+expect("hyphen ticker offers the DOT form (IB's measured convention)", "VOLV.B" in _c, str(_c))
+expect("...the DOT form comes FIRST, so it resolves on the first probe", _c[0] == "VOLV.B", str(_c))
+expect("...still offers the SPACE form (NDA-FI needs it)", "VOLV B" in _c, str(_c))
+expect("...and the concatenated form (NDA-SE, ROCK-B need it)", "VOLVB" in _c, str(_c))
+expect("...the raw hyphen form is still tried (never IB's, but harmless)", "VOLV-B" in _c, str(_c))
 expect("suffix is stripped before generating candidates",
        all(".ST" not in x for x in _c), str(_c))
 
@@ -207,6 +210,14 @@ finally:
     _b.IB_SYMBOL_FIX.pop("RYA.IR", None)
 expect("IB_SYMBOL_FIX ships EMPTY (entries must be verified against live IB first)",
        IB_SYMBOL_FIX == {}, str(IB_SYMBOL_FIX))
+
+# Euronext Dublin dropped 2026-08-30: 0/20 Irish names qualified at IB (no Dublin permission).
+# Guard against a silent re-add — every .IR name would re-enter the universe and fail every run,
+# re-feeding the "universe shrinking" alerts this venue was removed to stop.
+expect("ISEQ 20 is OUT of EURO_INDEX_PAGES", "ISEQ 20" not in EURO_INDEX_PAGES,
+       str(list(EURO_INDEX_PAGES)))
+expect("the .IR suffix is no longer in the scraped universe", ".IR" not in _ALL_SUFFIXES,
+       str(_ALL_SUFFIXES))
 
 print("\n" + "=" * 92)
 if fails:
