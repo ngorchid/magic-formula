@@ -12,6 +12,8 @@ returns remain absent — a residual, smaller bias.
 from __future__ import annotations
 
 import io
+import logging
+import time
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -221,22 +223,42 @@ def _scrape_index_tickers(pages: dict[str, tuple[str, str]], min_rows: int = 12)
     legitimately list only ~20 names.
     """
     out: set[str] = set()
+    failed: list[str] = []
     for name, (url, suffix) in pages.items():
-        try:
-            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
-            resp.raise_for_status()
-            for tbl in pd.read_html(io.StringIO(resp.text)):
-                cols = [str(c) for c in tbl.columns]
-                tc = next((c for c in cols if "Ticker" in c or "Symbol" in c
-                           or "MNEM" in c), None)   # ISEQ labels its column "MNEM code"
-                if tc and len(tbl) >= min_rows:
-                    got = {_normalise_ticker(x, suffix) for x in tbl[tc]}
-                    out |= {t for t in got if t}
+        got_any = False
+        # RETRY. Wikipedia rate-limits (HTTP 403 "Too many requests") when several indices are
+        # fetched back to back, and on 2026-08-30 that silently cost 68 of 461 names -- three
+        # indices dropped with only a log line, and nothing downstream could tell a rate-limited
+        # run from a genuinely smaller universe. A shrinking universe must never be quiet.
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+                resp.raise_for_status()
+                for tbl in pd.read_html(io.StringIO(resp.text)):
+                    cols = [str(c) for c in tbl.columns]
+                    tc = next((c for c in cols if "Ticker" in c or "Symbol" in c
+                               or "MNEM" in c), None)   # ISEQ labels its column "MNEM code"
+                    if tc and len(tbl) >= min_rows:
+                        got = {_normalise_ticker(x, suffix) for x in tbl[tc]}
+                        out |= {t for t in got if t}
+                        got_any = True
+                        break
+                if got_any:
                     break
-            else:
-                print(f"[universe] {name}: no constituent table found; skipping")
-        except Exception as e:  # noqa: BLE001 - skip an index that fails to fetch
-            print(f"[universe] {name} fetch failed ({e!r}); skipping")
+                print(f"[universe] {name}: no constituent table found")
+                break                                   # a missing table will not fix itself
+            except Exception as e:  # noqa: BLE001
+                if attempt == 2:
+                    print(f"[universe] {name} fetch FAILED after 3 attempts ({e!r})")
+                else:
+                    time.sleep(2.0 * (attempt + 1))     # linear backoff; the 403 is transient
+        if not got_any:
+            failed.append(name)
+    if failed:
+        # LOUD, because the caller cannot distinguish "index unavailable" from "index is small".
+        logging.error("UNIVERSE INCOMPLETE — %d of %d indices did not scrape: %s. The universe "
+                      "is smaller than configured and rankings will silently omit those venues.",
+                      len(failed), len(pages), ", ".join(failed))
     return sorted(out)
 
 

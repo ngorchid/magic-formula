@@ -169,6 +169,45 @@ expect("EQNR.OL 917bn NOK converts to ~98bn USD",
 expect("the old financialCurrency tag would have overstated EQNR.OL ~9.4x",
        abs(1.0 / 0.1066 - 9.38) < 0.05)
 
+
+print()
+print("=" * 92)
+print("IB SYMBOL CANDIDATES — yfinance and IB disagree on share-class separators")
+print("=" * 92)
+
+# Measured against live IB 2026-08-30: VOLV-B.ST, NOVO-B.CO and RYA.IR all returned "no
+# security definition found". yfinance writes the class with a HYPHEN, IB generally with a
+# SPACE. The failure is SILENT — qualify() returns None, the order is refused, and the name
+# sits in the universe unable to ever trade. 23 European names carry a hyphen.
+from paper.broker import IB_SYMBOL_FIX, ib_symbol_candidates  # noqa: E402
+
+_c = ib_symbol_candidates("VOLV-B.ST")
+expect("hyphen ticker offers the SPACE form", "VOLV B" in _c, str(_c))
+expect("...and the concatenated form", "VOLVB" in _c, str(_c))
+expect("...with the yfinance form FIRST (most venues do agree)", _c[0] == "VOLV-B", str(_c))
+expect("suffix is stripped before generating candidates",
+       all(".ST" not in x for x in _c), str(_c))
+
+# A plain ticker must not generate junk alternatives — every extra candidate is a wasted IB
+# round trip on the monthly pull over ~960 names.
+eq("plain ticker yields exactly one candidate", ib_symbol_candidates("SAP.DE"), ["SAP"])
+eq("US ticker yields exactly one candidate", ib_symbol_candidates("AAPL"), ["AAPL"])
+expect("no duplicates when the forms coincide",
+       len(ib_symbol_candidates("BT-A.L")) == len(set(ib_symbol_candidates("BT-A.L"))),
+       str(ib_symbol_candidates("BT-A.L")))
+
+# IB_SYMBOL_FIX must take precedence — it exists for tickers that DIFFER (Dublin lists Ryanair
+# as RY4C, yfinance as RYA), which no formatting rule can derive.
+import paper.broker as _b  # noqa: E402
+_b.IB_SYMBOL_FIX["RYA.IR"] = "RY4C"
+try:
+    expect("IB_SYMBOL_FIX overrides and comes FIRST",
+           ib_symbol_candidates("RYA.IR")[0] == "RY4C", str(ib_symbol_candidates("RYA.IR")))
+finally:
+    _b.IB_SYMBOL_FIX.pop("RYA.IR", None)
+expect("IB_SYMBOL_FIX ships EMPTY (entries must be verified against live IB first)",
+       IB_SYMBOL_FIX == {}, str(IB_SYMBOL_FIX))
+
 print("\n" + "=" * 92)
 if fails:
     print(f"{len(fails)} FAILURE(S) of {ran}:")

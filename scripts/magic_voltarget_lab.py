@@ -53,6 +53,26 @@ from strategies.magic_formula import (EnhancedMagicConfig,   # noqa: E402
                                       enhanced_weights)
 from strategies.magic_formula.construct import pnl           # noqa: E402
 from run_best_magic import _load                              # noqa: E402
+from paper.orchestrator import PaperConfig, _book_vol          # noqa: E402
+
+
+def covariance_est(w, adj, vol63, cfg) -> pd.Series:
+    """est_book_vol = sqrt(w' Sigma w) on the HELD names, recomputed when holdings change.
+
+    The estimator ported from the trend overlay on 2026-08-29. Holdings only move at the
+    monthly rebalance, so the covariance is evaluated there and forward-filled -- recomputing a
+    30x30 correlation every day would give the same answer at ~20x the cost.
+    """
+    pcfg = PaperConfig()
+    rets = adj.pct_change(fill_method=None)
+    change = w.index[(w.diff().abs().sum(axis=1) > 1e-12)]
+    out = pd.Series(np.nan, index=w.index, dtype=float)
+    for dt in change:
+        names = [t for t in w.columns[w.loc[dt] > 0]]
+        bv = _book_vol(rets.loc[:dt], names, vol63.loc[dt], pcfg)
+        if bv:
+            out.loc[dt] = bv
+    return out.ffill()
 
 
 def main() -> None:
@@ -98,9 +118,31 @@ def main() -> None:
               f"{s['max_drawdown']:>+9.2%}{ws.sum(axis=1).mean():>11.2f}")
         rows.append({"variant": lab, "ann": s["ann_return"], "sharpe": s["sharpe"],
                      "dd": s["max_drawdown"], "gross": float(ws.sum(axis=1).mean())})
-    print("\n  Compare with the alternative: a 1-year 10% OTM put costs ~3.1%/yr of notional,")
-    print("  takes maxDD to ~-14% and Sharpe to ~0.93. Vol targeting buys most of that")
-    print("  protection for NO premium, because it de-levers instead of insuring.")
+    # ---- the SAME sweep on the covariance estimator ------------------------------------
+    est_cov = covariance_est(w, adj, vol63, cfg).reindex(est.index).ffill()
+    both = pd.DataFrame({"median_x_0.6": est, "covariance": est_cov}).dropna()
+    print("\n" + "=" * 80)
+    print("SAME SWEEP, COVARIANCE ESTIMATOR  (sqrt(w' Sigma w), ported 2026-08-29)")
+    print("=" * 80)
+    print(f"  est_book_vol   median x 0.6: median {both['median_x_0.6'].median():.1%}   "
+          f"covariance: median {both['covariance'].median():.1%}   "
+          f"ratio {(both['covariance'] / both['median_x_0.6']).median():.3f}")
+    print(f"  {'variant':36}{'ann ret':>10}{'Sharpe':>9}{'maxDD':>9}{'avg gross':>11}")
+    print("  " + "-" * 76)
+    for tgt in (0.25, 0.20, 0.15, 0.12):
+        sc = (tgt / est_cov).replace([np.inf, -np.inf], np.nan).ffill().fillna(1.0).clip(0.0, 1.0)
+        ws = w.mul(sc.shift(1).fillna(1.0), axis=0)
+        n, _ = pnl(ws, adj, volume, close)
+        s2 = summary_stats(n.reindex(idx).fillna(0.0))
+        print(f"  {'vol_target ' + format(tgt, '.0%') + ' (COVARIANCE)':36}"
+              f"{s2['ann_return']:>+10.2%}{s2['sharpe']:>+9.2f}"
+              f"{s2['max_drawdown']:>+9.2%}{ws.sum(axis=1).mean():>11.2f}")
+        rows.append({"variant": f"vol_target {tgt:.0%} COVARIANCE", "ann": s2["ann_return"],
+                     "sharpe": s2["sharpe"], "dd": s2["max_drawdown"],
+                     "gross": float(ws.sum(axis=1).mean())})
+    print("\n  The covariance estimate is HIGHER, so each nominal target de-grosses more and")
+    print("  lands at a lower realised vol. Compare rows at equal REALISED risk, not at equal")
+    print("  label: a 20% covariance target is not the same book as a 20% median-x-0.6 target.")
     pd.DataFrame(rows).to_csv(ROOT / "results" / "magic_voltarget.csv", index=False)
 
 

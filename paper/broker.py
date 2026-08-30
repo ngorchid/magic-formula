@@ -34,11 +34,47 @@ SUFFIX_MAP: dict[str, tuple[str, str]] = {
 
 
 def ib_contract_spec(yf_ticker: str) -> tuple[str, str, str]:
-    """(ib_symbol, currency, primaryExchange) for a yfinance ticker. US => SMART/USD."""
+    """(ib_symbol, currency, primaryExchange) for a yfinance ticker. US => SMART/USD.
+
+    The symbol returned is the FIRST candidate; see `ib_symbol_candidates` for why one is not
+    enough.
+    """
     for suf, (ccy, exch) in SUFFIX_MAP.items():
         if yf_ticker.endswith(suf):
             return yf_ticker[: -len(suf)], ccy, exch
     return yf_ticker, "USD", ""
+
+
+def ib_symbol_candidates(yf_ticker: str) -> list[str]:
+    """Candidate IB symbols for a yfinance ticker, most likely first.
+
+    yfinance and IB DISAGREE on share-class separators, and the disagreement is silent: an
+    unresolvable contract makes `qualify` return None, the order is refused, and the name is
+    skipped with a log line — so it sits in the universe and can never trade. Measured
+    2026-08-30 against live IB, `VOLV-B.ST` / `NOVO-B.CO` / `RYA.IR` all failed with "no
+    security definition found".
+
+    yfinance writes the class with a HYPHEN (VOLV-B); IB generally uses a SPACE (VOLV B), and
+    occasionally neither (VOLVB). 23 of the European names carry a hyphen — 22 Stockholm plus
+    BT-A.L — so this is not an edge case.
+
+    Rather than encode a convention I would be guessing at, `qualify` tries these in order and
+    keeps whichever IB accepts, logging the winner. Cases where the TICKER ITSELF differs
+    (Dublin lists Ryanair as RY4C, yfinance as RYA) cannot be derived and need `IB_SYMBOL_FIX`.
+    """
+    base, _, _ = ib_contract_spec(yf_ticker)
+    fixed = IB_SYMBOL_FIX.get(yf_ticker)
+    out = [fixed] if fixed else []
+    for cand in (base, base.replace("-", " "), base.replace("-", "")):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
+# Tickers where IB's symbol is not a formatting variant of yfinance's but a DIFFERENT symbol.
+# Only add entries VERIFIED against live IB — a wrong entry here silently trades the wrong
+# instrument, which is far worse than the unresolved-contract failure it replaces.
+IB_SYMBOL_FIX: dict[str, str] = {}
 
 
 # ccy -> (IB pair, is the ccy the BASE of that pair?). IB quotes minor currencies against USD
@@ -108,14 +144,29 @@ class Broker:
         if ticker in self._contracts:
             return self._contracts[ticker]
         from ib_insync import Stock
-        sym, ccy, exch = ib_contract_spec(ticker)
-        c = Stock(sym, "SMART", ccy, primaryExchange=exch) if exch else Stock(sym, "SMART", ccy)
-        try:
-            q = self.ib.qualifyContracts(c)
-            self._contracts[ticker] = q[0] if q else None
-        except Exception as e:  # noqa: BLE001
-            logging.warning("qualify failed for %s: %s", ticker, e)
-            self._contracts[ticker] = None
+        _, ccy, exch = ib_contract_spec(ticker)
+        cands = ib_symbol_candidates(ticker)
+        self._contracts[ticker] = None
+        for i, sym in enumerate(cands):
+            c = (Stock(sym, "SMART", ccy, primaryExchange=exch) if exch
+                 else Stock(sym, "SMART", ccy))
+            try:
+                q = self.ib.qualifyContracts(c)
+            except Exception as e:  # noqa: BLE001
+                logging.debug("qualify %s as %r: %s", ticker, sym, e)
+                continue
+            if q:
+                if i > 0:
+                    # Worth an INFO line: it means the primary form is wrong for this venue and
+                    # the mapping should eventually be encoded rather than rediscovered daily.
+                    logging.info("qualified %s as %r (candidate %d of %d)",
+                                 ticker, sym, i + 1, len(cands))
+                self._contracts[ticker] = q[0]
+                break
+        if self._contracts[ticker] is None:
+            logging.warning("cannot resolve %s at IB — tried %s. It will NEVER trade; add a "
+                            "verified entry to IB_SYMBOL_FIX if the ticker itself differs.",
+                            ticker, cands)
         return self._contracts[ticker]
 
     def price(self, ticker: str) -> float | None:
