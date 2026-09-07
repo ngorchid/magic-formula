@@ -303,13 +303,36 @@ class Broker:
                 if trade.orderStatus.status == "Filled" or trade.orderStatus.status in self._DEAD:
                     break
             st = trade.orderStatus.status
-            if st in self._DEAD:
-                logging.warning("%s %d %s NOT live (status=%s) — not recorded", action, shares, ticker, st)
-                return {"ok": False, "status": st, "fill_price": None}
-            fill = trade.orderStatus.avgFillPrice or None
-            logging.info("%s %d %s -> %s%s", action, shares, ticker, st,
-                         f" @ {fill}" if fill else " (queued, fills at next open)")
-            return {"ok": True, "status": st, "fill_price": float(fill) if fill else None}
+            if st == "Filled":
+                fill = trade.orderStatus.avgFillPrice or None
+                logging.info("%s %d %s -> Filled @ %s", action, shares, ticker, fill)
+                return {"ok": True, "status": st, "fill_price": float(fill) if fill else None}
+            # NOT filled within the wait. Booking a queued order at the mark is what created
+            # phantoms: a market order into a CLOSED market — a US holiday, a European local
+            # holiday (every venue has its own), or Oslo after its 16:20 close — sits PreSubmitted,
+            # was booked, then expired overnight unfilled while state still carried it. So CANCEL it
+            # and record NOTHING: the name is simply re-picked next run when its market is open.
+            # This is not "blocking a close" — an unfilled SELL leaves the position intact in BOTH
+            # state and the broker (consistent) and retries next run. If the order filled in the
+            # race just before the cancel landed, honour that fill instead of dropping it.
+            if st not in self._DEAD:
+                try:
+                    self.ib.cancelOrder(order)
+                    self.ib.sleep(1.5)
+                except Exception:  # noqa: BLE001
+                    pass
+                if trade.orderStatus.status == "Filled":
+                    fill = trade.orderStatus.avgFillPrice or None
+                    logging.info("%s %d %s -> Filled @ %s (during cancel race)",
+                                 action, shares, ticker, fill)
+                    return {"ok": True, "status": "Filled",
+                            "fill_price": float(fill) if fill else None}
+                st = trade.orderStatus.status
+            part = int(trade.orderStatus.filled or 0)
+            logging.warning("%s %d %s NOT filled (status=%s, filled=%d) — cancelled, not recorded; "
+                            "market likely closed, will retry next run",
+                            action, shares, ticker, st, part)
+            return {"ok": False, "status": st, "fill_price": None}
         except Exception as e:  # noqa: BLE001
             logging.error("order failed %s %s %d: %s", action, ticker, shares, e)
             return {"ok": False, "status": "error", "fill_price": None}
