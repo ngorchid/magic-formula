@@ -365,7 +365,7 @@ print("\n" + "=" * 92)
 print("FX CASH SWEEP")
 print("=" * 92)
 
-from paper.orchestrator import plan_fx_sweep  # noqa: E402
+from paper.orchestrator import plan_fx_sweep, settlement_rates  # noqa: E402
 
 _FX = {"EUR": 1.16, "GBP": 1.35, "CHF": 1.24, "SEK": 0.104, "DKK": 0.155,
        "NOK": 0.107, "USD": 1.0}
@@ -398,6 +398,27 @@ _p = plan_fx_sweep({"EUR": -12_000.0}, {"EUR": float("nan")})
 expect("NaN rate is skipped", Check("EUR" not in _p, str(_p)))
 _p = plan_fx_sweep({"EUR": -12_000.0}, {"EUR": 0.0})
 expect("zero rate is skipped", Check("EUR" not in _p, str(_p)))
+
+# REGRESSION (2026-09-08): the LIVE fx table is keyed by the QUOTE currency, so London names
+# carry 'GBp' (USD per PENCE), never 'GBP'. IB cash balances are in the MAJOR code 'GBP', so
+# the sweep looked up a key that did not exist and left -£1,110.90 unswept for four days. The
+# fix re-keys the table to settlement (major) currencies before planning. These tests use a
+# 'GBp'-keyed table exactly as _fx_to_usd produces it, NOT the major-keyed _FX above — that is
+# the case the old fixture never exercised.
+_FX_QUOTED = {"EUR": 1.16, "GBp": 0.0135, "NOK": 0.107, "USD": 1.0}   # GBp = USD per pence
+_sr = settlement_rates(_FX_QUOTED)
+expect("settlement_rates folds GBp -> GBP at 100x (USD per pound)",
+       close(_sr.get("GBP", 0.0), 1.35, 1e-9))
+expect("...and leaves a native major (NOK) unchanged", close(_sr.get("NOK", 0.0), 0.107, 1e-12))
+expect("...and drops the minor 'GBp' key", Check("GBp" not in _sr, str(_sr)))
+# The end-to-end fix: a GBP cash balance is now sized against the POUND rate and swept.
+_p = plan_fx_sweep({"GBP": -1_110.90}, settlement_rates(_FX_QUOTED))
+expect("GBP balance from a pence-quoted book IS swept (was the bug)",
+       close(_p.get("GBP", 0.0), 1_110.90, 1e-6))
+# And the size uses the pound rate (~$1,500), decisively above the $500 floor — proving it is
+# not skipped as sub-threshold the way the raw pence rate (~$15) would have made it.
+expect("the swept GBP is valued at the pound rate, not the pence rate",
+       Check(abs(-1_110.90 * _sr["GBP"]) > 1_000, f"${abs(-1110.90*_sr['GBP']):.0f}"))
 
 # Multi-currency: each is decided on its own USD value, independently.
 _p = plan_fx_sweep({"USD": 30_000.0, "EUR": -16_000.0, "GBP": -5_000.0,

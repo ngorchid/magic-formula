@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from paper.live_data import _MINOR_UNITS   # for the FX-sweep settlement-currency re-keying
 from paper.state import HOLD_DAYS, PortfolioState, Position
 from risk_guard import (MarginLimits, RiskLimits, check_order, liquidity_check,
                         price_sane, stale_columns)
@@ -119,6 +120,26 @@ def plan_fx_sweep(balances: dict[str, float], fx: dict[str, float],
     return plan
 
 
+def settlement_rates(fx: dict[str, float]) -> dict[str, float]:
+    """Re-key the quote-currency fx table by the ISO MAJOR code IB settles cash in.
+
+    `fx` is keyed as yfinance QUOTES each name, so a pence-quoted London name carries the key
+    'GBp' (USD per PENCE), not 'GBP'. But IB reports cash balances in the MAJOR code 'GBP'
+    (pounds), so plan_fx_sweep's `fx.get('GBP')` missed entirely and every London-driven GBP
+    balance was logged "no rate ... left unswept" and left financed at the debit rate (seen
+    2026-09-08: -£1,110.90 unswept for four days). Fold minor -> major, scaling the rate up by
+    the subdivision so it is USD per MAJOR unit: USD/GBP = USD/GBp * 100. Native major codes
+    (EUR, NOK, ...) map to themselves unchanged (div 1.0).
+    """
+    out: dict[str, float] = {}
+    for ccy, rate in fx.items():
+        major, div = _MINOR_UNITS.get(ccy, (ccy, 1.0))
+        # Prefer a finite rate if both a minor and its own major happen to appear; they agree.
+        if major not in out or not np.isfinite(out[major]):
+            out[major] = rate * div
+    return out
+
+
 def run_fx_sweep(broker, balances: dict[str, float], fx: dict[str, float],
                  cfg: PaperConfig) -> list[tuple[str, float, str]]:
     """Execute `plan_fx_sweep`. Returns [(ccy, units, status)] for the report."""
@@ -130,9 +151,11 @@ def run_fx_sweep(broker, balances: dict[str, float], fx: dict[str, float],
         # would let the interest accrue unnoticed.
         logging.info("fx sweep: no balances available (dry-run or account read failed)")
         return []
+    # Balances are keyed by settlement (major) ccy; the fx table may be keyed in a minor unit.
+    rates = settlement_rates(fx)
     out = []
-    for ccy, units in plan_fx_sweep(balances, fx, cfg.fx_sweep_min_usd).items():
-        res = broker.convert_fx(ccy, units, fx.get(ccy, 0.0))
+    for ccy, units in plan_fx_sweep(balances, rates, cfg.fx_sweep_min_usd).items():
+        res = broker.convert_fx(ccy, units, rates.get(ccy, 0.0))
         out.append((ccy, units, res.get("status", "?")))
     return out
 
