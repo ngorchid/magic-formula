@@ -159,6 +159,35 @@ def needed_contracts(ev: pd.DataFrame) -> dict[tuple[str, str], list]:
     return need
 
 
+_MONTHMAP: dict[str, dict[str, str]] = {}
+
+
+def contract_months(ib, symbol: str) -> dict[str, str]:
+    """{YYYYMM -> the contract's actual lastTradeDate YYYYMMDD} for everything IB still knows.
+
+    Two things this exists for. `lastTradeDateOrContractMonth` is a full DATE (20260930), not
+    a month, so passing YYYYMM fails to qualify at all. And IB's retention for EXPIRED futures
+    is about ONE YEAR -- measured 2026-09-10: ZT/ZF back to 20250930, ZN/TN/ZB to 20251219 --
+    so enumerating tells us up front which events are priceable instead of discovering it as
+    hundreds of silent misses.
+    """
+    if symbol in _MONTHMAP:
+        return _MONTHMAP[symbol]
+    from ib_insync import Future
+    c = Future(symbol=symbol, exchange=CONTRACTS[symbol].exchange,
+               currency="USD", includeExpired=True)
+    out: dict[str, str] = {}
+    try:
+        for d in ib.reqContractDetails(c):
+            ltd = d.contract.lastTradeDateOrContractMonth
+            if len(ltd) >= 6:
+                out[ltd[:6]] = ltd
+    except Exception as exc:  # noqa: BLE001
+        print(f"  {symbol}: contract enumeration failed: {exc}")
+    _MONTHMAP[symbol] = out
+    return out
+
+
 def fetch_history(ib, symbol: str, yyyymm: str) -> pd.DataFrame | None:
     """Daily settlement history for ONE expired contract month, cached to disk.
 
@@ -173,7 +202,13 @@ def fetch_history(ib, symbol: str, yyyymm: str) -> pd.DataFrame | None:
         return None if df.empty else df.set_index("date")
 
     from ib_insync import Future
-    c = Future(symbol=symbol, lastTradeDateOrContractMonth=yyyymm,
+    ltd = contract_months(ib, symbol).get(yyyymm)
+    if ltd is None:
+        # Beyond IB's ~1y expired retention, or not a listed month. Cache the miss so a
+        # re-run does not pay the round trip again.
+        pd.DataFrame(columns=["date"]).to_csv(path, index=False)
+        return None
+    c = Future(symbol=symbol, lastTradeDateOrContractMonth=ltd,
                exchange=CONTRACTS[symbol].exchange, currency="USD", includeExpired=True)
     try:
         qual = ib.qualifyContracts(c)
@@ -184,7 +219,7 @@ def fetch_history(ib, symbol: str, yyyymm: str) -> pd.DataFrame | None:
         # data ending today, which returns nothing for a contract that stopped trading years
         # ago. 1 Y back from expiry covers the whole period a quarterly Treasury future is
         # actively quoted.
-        end = (pd.Timestamp(f"{yyyymm}01") + pd.offsets.MonthEnd(1)).to_pydatetime()
+        end = (pd.Timestamp(ltd) + pd.Timedelta(days=1)).to_pydatetime()
         bars = ib.reqHistoricalData(
             qual[0], endDateTime=end, durationStr="1 Y", barSizeSetting="1 day",
             whatToShow="TRADES", useRTH=True, formatDate=1)
@@ -195,7 +230,14 @@ def fetch_history(ib, symbol: str, yyyymm: str) -> pd.DataFrame | None:
         time.sleep(PACE_SECONDS)
 
     if not bars:
-        pd.DataFrame(columns=["date"]).to_csv(path, index=False)
+        # DO NOT cache this as a miss. An empty result here is usually TRANSIENT -- most often
+        # IB error 162 "Trading TWS session is connected from a different IP address", which
+        # means the account's market-data session is bound to another machine (e.g. the
+        # Windows box running the live sleeves) and blocks historical data everywhere else.
+        # Caching it would make a later, working run silently return nothing. Only a month
+        # ABSENT from `contract_months` is a permanent miss, and that is cached above.
+        print(f"    {symbol} {yyyymm}: qualified but returned no bars — not cached, "
+              f"will retry (check IB error 162 / market-data session)")
         return None
     df = pd.DataFrame([{"date": pd.Timestamp(b.date), "close": float(b.close)} for b in bars])
     df.to_csv(path, index=False)
