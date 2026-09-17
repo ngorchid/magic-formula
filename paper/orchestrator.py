@@ -504,6 +504,15 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     # LAST, after every equity trade, so it nets the day's true end-state rather than
     # converting for a buy and back for a sell. It deliberately does NOT run before the buy
     # loop: a sweep that fired first would convert USD the buys then need back again.
+    #
+    # Let IB's cash-balance feed settle first. A foreign stock BUY posts its negative FX cash
+    # balance a beat after the fill, so reading immediately (as this did) misses a same-day
+    # balance entirely: the sweep sees nothing, logs nothing, and the balance sits financed until
+    # the NEXT run picks it up -- and it never warns, because it cannot warn about a balance it
+    # did not see. DKK -9,548 from a ZEAL buy went unswept and unwarned for a day this way
+    # (2026-09-16). Same 3s settle-delay the reconcile already uses; dry-run has no ib to sleep on.
+    if not getattr(broker, "dry_run", False) and getattr(broker, "ib", None) is not None:
+        broker.ib.sleep(3)
     swept = run_fx_sweep(broker, broker.cash_balances() if hasattr(broker, "cash_balances")
                          else {}, fx, cfg)
     if swept:
