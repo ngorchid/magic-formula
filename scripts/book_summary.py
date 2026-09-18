@@ -173,13 +173,22 @@ def build() -> tuple[str, str]:
     # NAV = INCEPTION_CAPITAL + total by construction. Daily and drawdown come from a persisted
     # NetLiq curve (builds up over time). If the account cannot be read, fall back to summing the
     # sleeve ledgers so the row is never blank.
+    # The sleeves' latest two trading dates — the interval their DAILY covers. The book daily must
+    # cover the SAME interval, or e.g. 368 + 510 gets compared against a different day's NetLiq
+    # move (13:32 misfire: sleeves showed 09-16->09-17, NetLiq history showed 09-17->09-18).
+    sdates = sorted({d for s in series_all for d in s})
     recon = None
     if net_liq is not None:
         nl_series = {h["date"]: h["net_liq"] - INCEPTION_CAPITAL
                      for h in _save_netliq(_load_netliq_hist(), today, net_liq)}
-        book_total, book_daily = net_liq - INCEPTION_CAPITAL, _daily(nl_series)
+        book_total = net_liq - INCEPTION_CAPITAL
         book_mdd = _max_drawdown(nl_series)
         recon = book_total - sleeve_sum      # unbooked FX financing / borrow / sweep costs + marking drift
+        # DAILY aligned to the sleeves' latest interval; None until the NetLiq history (new, built
+        # from the scheduled EOD runs) has a snapshot on BOTH of those dates.
+        book_daily = (nl_series[sdates[-1]] - nl_series[sdates[-2]]
+                      if len(sdates) >= 2 and sdates[-1] in nl_series and sdates[-2] in nl_series
+                      else None)
     else:
         book = _combined(series_all)
         book_total, book_daily, book_mdd = _latest(book), _daily(book), _max_drawdown(book)
@@ -199,18 +208,29 @@ def build() -> tuple[str, str]:
                 f"<td style='color:#b91c1c'>{dd}</td>"
                 f"<td style='color:#64748b'>{s['inception'] or ''}</td></tr>")
 
-    def _bridge(label, val, top=False):
-        """A faint reconciliation row: only the 'Since inception' column carries a value, so the
-        table visibly closes  sleeves -> +sum -> -costs/drift -> account."""
+    def _bridge(label, daily_v, total_v, top=False):
+        """A faint reconciliation row so the table visibly closes in BOTH the daily and the
+        since-inception columns:  sleeves -> +sum -> -costs/drift -> account. A column shows a
+        value only where the arithmetic is defined (daily is blank until the book daily aligns)."""
         border = "border-top:1px solid #cbd5e1" if top else ""
-        col = "#1a7f37" if (val or 0) >= 0 else "#b91c1c"
+
+        def cell(v):
+            if v is None:
+                return "<td></td>"
+            return f"<td style='color:{'#1a7f37' if v >= 0 else '#b91c1c'}'>{_money(v)}</td>"
         return (f"<tr style='color:#94a3b8;{border}'><td style='padding:2px 16px 2px 0'>{label}</td>"
-                f"<td></td><td style='color:{col}'>{_money(val)}</td><td></td><td></td></tr>")
+                f"{cell(daily_v)}{cell(total_v)}<td></td><td></td></tr>")
 
     rows = "".join(_row(s) for s in sleeves)
     if recon is not None:                      # NetLiq-based book: show the bridge so it adds up
-        rows += _bridge("= sum of sleeves", sleeve_sum, top=True)
-        rows += _bridge("− unbooked costs / marking drift", recon)
+        # Daily bridge only when the book daily is aligned AND every sleeve has a daily — otherwise
+        # a 'drift' would be a period mismatch, not a cost, so leave the daily cells blank.
+        sdaily = (sum(s["daily"] for s in sleeves)
+                  if sleeves and all(s["daily"] is not None for s in sleeves) else None)
+        show_daily = book_daily is not None and sdaily is not None
+        rows += _bridge("= sum of sleeves", sdaily if show_daily else None, sleeve_sum, top=True)
+        rows += _bridge("− costs / marking drift",
+                        (book_daily - sdaily) if show_daily else None, recon)
     rows += _row(book_row, bold=True)
     pnl_tbl = (f"<table style='border-collapse:collapse;font-family:monospace;font-size:13px'>"
                f"<tr style='color:#64748b'><td style='padding-right:16px'>Sleeve</td><td>Daily P&amp;L</td>"
@@ -224,6 +244,11 @@ def build() -> tuple[str, str]:
                       f"sleeve rows are each strategy's own ledger. They differ by {_money(recon)} — "
                       f"unbooked FX financing / borrow / sweep costs and marking drift (yfinance vs "
                       f"IB, run-time marks vs now) — shown as the bridge rows above.</p>")
+        if book_daily is None:
+            recon_note += ("<p style='color:#64748b;font-size:11px;margin:4px 0'>Book <b>daily</b> shows "
+                           "&mdash; until the NetLiq history spans the sleeves' latest two trading days "
+                           "(it is new and fills in from the 21:00 run); the sleeve dailies above are each "
+                           "strategy's own last-run change, so they are not yet comparable to the account.</p>")
 
     if m:
         nl, mm = m.get("NetLiquidation", 0.0), m.get("FullMaintMarginReq", 0.0)
