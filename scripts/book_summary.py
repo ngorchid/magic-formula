@@ -182,7 +182,11 @@ def build() -> tuple[str, str]:
         nl_series = {h["date"]: h["net_liq"] - INCEPTION_CAPITAL
                      for h in _save_netliq(_load_netliq_hist(), today, net_liq)}
         book_total = net_liq - INCEPTION_CAPITAL
-        book_mdd = _max_drawdown(nl_series)
+        # DRAWDOWN from the combined sleeve P&L PATH (magic since inception + trend), not the NetLiq
+        # history: the latter is new and would read ~0 until it happens to capture a real dip.
+        # Drawdown is invariant to a constant offset, so the sleeve path approximates the account's
+        # own within the (roughly level) cost/marking drift, and it has the full history.
+        book_mdd = _max_drawdown(_combined(series_all))
         recon = book_total - sleeve_sum      # unbooked FX financing / borrow / sweep costs + marking drift
         # DAILY aligned to the sleeves' latest interval; None until the NetLiq history (new, built
         # from the scheduled EOD runs) has a snapshot on BOTH of those dates.
@@ -273,9 +277,11 @@ def build() -> tuple[str, str]:
     {recon_note}
     <h3 style='color:#1a3c5e'>Account risk</h3>
     {risk_tbl}
-    <p style='color:#64748b;font-size:11px;margin-top:14px'>Sleeve P&amp;L and drawdown are each
-    sleeve's own ledger; the WHOLE BOOK row is the account (NetLiq − inception capital), and its
-    daily / drawdown build from a persisted NetLiq history. Read-only summary — no orders placed.</p>
+    <p style='color:#64748b;font-size:11px;margin-top:14px'>Per-sleeve P&amp;L and drawdown are each
+    sleeve's own ledger. The WHOLE BOOK total is the account (NetLiq − inception capital); its daily
+    aligns to the sleeves' latest trading day from a persisted NetLiq history (— until that history
+    has depth); its drawdown is the peak-to-trough of the combined sleeve P&amp;L path (a proxy for
+    the account curve, since NetLiq history since inception was not recorded). Read-only — no orders.</p>
     </body></html>"""
 
     bdaily = book_row["daily"]
