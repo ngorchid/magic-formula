@@ -184,7 +184,8 @@ def build() -> tuple[str, str]:
         book = _combined(series_all)
         book_total, book_daily, book_mdd = _latest(book), _daily(book), _max_drawdown(book)
 
-    book_row = {"label": "WHOLE BOOK", "inception": book_since, "base": INCEPTION_CAPITAL,
+    book_row = {"label": f"WHOLE BOOK (NAV - ${INCEPTION_CAPITAL:,.0f})",
+                "inception": book_since, "base": INCEPTION_CAPITAL,
                 "daily": book_daily, "total": book_total, "mdd": book_mdd}
 
     def _row(s, bold=False):
@@ -198,7 +199,19 @@ def build() -> tuple[str, str]:
                 f"<td style='color:#b91c1c'>{dd}</td>"
                 f"<td style='color:#64748b'>{s['inception'] or ''}</td></tr>")
 
-    rows = "".join(_row(s) for s in sleeves) + _row(book_row, bold=True)
+    def _bridge(label, val, top=False):
+        """A faint reconciliation row: only the 'Since inception' column carries a value, so the
+        table visibly closes  sleeves -> +sum -> -costs/drift -> account."""
+        border = "border-top:1px solid #cbd5e1" if top else ""
+        col = "#1a7f37" if (val or 0) >= 0 else "#b91c1c"
+        return (f"<tr style='color:#94a3b8;{border}'><td style='padding:2px 16px 2px 0'>{label}</td>"
+                f"<td></td><td style='color:{col}'>{_money(val)}</td><td></td><td></td></tr>")
+
+    rows = "".join(_row(s) for s in sleeves)
+    if recon is not None:                      # NetLiq-based book: show the bridge so it adds up
+        rows += _bridge("= sum of sleeves", sleeve_sum, top=True)
+        rows += _bridge("− unbooked costs / marking drift", recon)
+    rows += _row(book_row, bold=True)
     pnl_tbl = (f"<table style='border-collapse:collapse;font-family:monospace;font-size:13px'>"
                f"<tr style='color:#64748b'><td style='padding-right:16px'>Sleeve</td><td>Daily P&amp;L</td>"
                f"<td>Since inception</td><td>Max drawdown</td><td>Since</td></tr>{rows}</table>")
@@ -206,12 +219,11 @@ def build() -> tuple[str, str]:
     # Reconciliation: the book row is NetLiq-based (ties to NAV); the sleeves are ledger-based.
     recon_note = ""
     if recon is not None:
-        recon_note = (f"<p style='color:#64748b;font-size:11px;margin:4px 0'>Book P&amp;L is the "
-                      f"account's NetLiq − ${INCEPTION_CAPITAL:,.0f} inception capital, so "
-                      f"NAV = ${INCEPTION_CAPITAL:,.0f} + book P&amp;L exactly. The sleeve ledgers sum "
-                      f"to {_money(sleeve_sum)}; the {_money(recon)} difference is unbooked FX "
-                      f"financing / borrow / sweep costs and marking drift (yfinance vs IB, "
-                      f"run-time marks vs now).</p>")
+        recon_note = (f"<p style='color:#64748b;font-size:11px;margin:4px 0'>The book row is the "
+                      f"ACCOUNT (NetLiq − ${INCEPTION_CAPITAL:,.0f}), so it ties to NAV exactly; the "
+                      f"sleeve rows are each strategy's own ledger. They differ by {_money(recon)} — "
+                      f"unbooked FX financing / borrow / sweep costs and marking drift (yfinance vs "
+                      f"IB, run-time marks vs now) — shown as the bridge rows above.</p>")
 
     if m:
         nl, mm = m.get("NetLiquidation", 0.0), m.get("FullMaintMarginReq", 0.0)
