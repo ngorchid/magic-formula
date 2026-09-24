@@ -231,6 +231,22 @@ m_drawn = {f"T{i}": 20.0 for i in range(10)}
 expect("drawn-down book sizes off NAV, not cfg.budget",
        Check(_slot_usd(drawn, m_drawn, {}, CFG, 1.0) < 100_000.0 / CFG.top_n,
              f"slot ${_slot_usd(drawn, m_drawn, {}, CFG, 1.0):,.0f}"))
+
+# THE CAP (2026-09-24): allocate to this sleeve only UP TO cfg.budget. Above it, the base stays
+# at cfg.budget so gains are not compounded into more deployment (they become reserve / free
+# collateral for the other sleeves); below it, the base is still NAV so the book de-risks.
+CAP = replace(CFG, budget=50_000.0)
+_up = book(cash=80_000.0, holdings={})                       # NAV 80k, well over the 50k cap
+expect("NAV above the cap -> slot sizes off the CAP, not NAV",
+       close(_slot_usd(_up, {}, {}, CAP, 1.0), 50_000.0 / CAP.top_n, 1e-6))
+expect("  ... i.e. the excess over the cap is NOT deployed",
+       Check(_slot_usd(_up, {}, {}, CAP, 1.0) < 80_000.0 / CAP.top_n, ""))
+_down = book(cash=40_000.0, holdings={})                     # NAV 40k, below the cap
+expect("NAV below the cap -> slot still sizes off NAV (de-risks)",
+       close(_slot_usd(_down, {}, {}, CAP, 1.0), 40_000.0 / CAP.top_n, 1e-6))
+expect("NAV exactly at the cap -> sizes off the cap",
+       close(_slot_usd(book(cash=50_000.0, holdings={}), {}, {}, CAP, 1.0),
+             50_000.0 / CAP.top_n, 1e-6))
 expect("slot is never negative for any gross_scalar",
        Check(all(_slot_usd(over, m_over, {}, CFG, g) >= 0.0 for g in (0.0, 0.25, 0.5, 1.0)), ""))
 
