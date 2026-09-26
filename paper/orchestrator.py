@@ -226,14 +226,19 @@ def _slot_usd(state, marks: dict[str, float], fx: dict[str, float],
     Sizing off the REMAINING gap self-corrects at zero extra turnover, since it only re-scales
     an order that was being placed anyway.
 
-    The gap is measured against **NAV**, not `cfg.budget`. Against a fixed budget, a book that
-    had drawn down would try to "top up" to the original number — buying with money the account
-    no longer has. NAV (cash + positions) is the amount actually available, so the book stays
-    ~fully invested and compounds, and `cfg.budget` only sets the STARTING capital.
+    The gap is measured against **min(NAV, cfg.budget)** — the sleeve's own equity, CAPPED at
+    cfg.budget. Two behaviours in one:
+      • DRAWDOWN: below the cap the base IS NAV (cash + positions), the amount actually available,
+        so the book de-risks with the equity rather than trying to "top up" to a number the
+        account no longer has.
+      • GAINS: once NAV grows past cfg.budget the base stays at cfg.budget, so the book deploys at
+        most cfg.budget of capital. Equity above that is left uninvested — a reserve that cushions
+        a later drawdown and, on the shared account, free collateral for the other sleeves. (Set
+        2026-09-24: allocate to this sleeve only UP TO cfg.budget, not compound past it.)
     The cash constraint is NOT applied here — see `_size_shares`, which applies it after the
     inverse-vol tilt has been multiplied in.
     """
-    nav = state.nav(marks, fx)
+    nav = min(state.nav(marks, fx), cfg.budget)
     invested = state.positions_value_usd(marks, fx)
     slots_free = max(cfg.top_n - len(state.tickers), 1)
     remaining = max(nav * gross_scalar - invested, 0.0)
@@ -504,6 +509,15 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
     # LAST, after every equity trade, so it nets the day's true end-state rather than
     # converting for a buy and back for a sell. It deliberately does NOT run before the buy
     # loop: a sweep that fired first would convert USD the buys then need back again.
+    #
+    # Let IB's cash-balance feed settle first. A foreign stock BUY posts its negative FX cash
+    # balance a beat after the fill, so reading immediately (as this did) misses a same-day
+    # balance entirely: the sweep sees nothing, logs nothing, and the balance sits financed until
+    # the NEXT run picks it up -- and it never warns, because it cannot warn about a balance it
+    # did not see. DKK -9,548 from a ZEAL buy went unswept and unwarned for a day this way
+    # (2026-09-16). Same 3s settle-delay the reconcile already uses; dry-run has no ib to sleep on.
+    if not getattr(broker, "dry_run", False) and getattr(broker, "ib", None) is not None:
+        broker.ib.sleep(3)
     swept = run_fx_sweep(broker, broker.cash_balances() if hasattr(broker, "cash_balances")
                          else {}, fx, cfg)
     if swept:

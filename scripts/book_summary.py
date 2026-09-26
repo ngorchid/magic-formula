@@ -44,6 +44,35 @@ TREND_STATE = Path(os.getenv("TREND_STATE",
     r"C:\Users\Nicolas\PycharmProjects\trend-overlay-live\results\paper\state.json"))
 TREND_BASE = float(os.getenv("TREND_BASE", "75000"))   # 50k budget x 1.5 overlay = effective sizing
 
+# The book's inception CAPITAL — the account's funded size when magic-formula went live
+# (2026-08-17). Book P&L since inception is (live NetLiq - this), so NAV ties to
+# INCEPTION_CAPITAL + book P&L by construction. Override if capital is ever added/withdrawn.
+INCEPTION_CAPITAL = float(os.getenv("BOOK_INCEPTION_CAPITAL", "50000"))
+# Persisted daily NetLiq, so the BOOK daily P&L and drawdown come from the ACCOUNT itself rather
+# than the summed sleeve ledgers. Builds up from the first run of this version onward.
+NETLIQ_HIST = ROOT / "results" / "paper" / "book_netliq.json"
+
+
+def _load_netliq_hist() -> list[dict]:
+    if NETLIQ_HIST.exists():
+        try:
+            return json.loads(NETLIQ_HIST.read_text())
+        except Exception:  # noqa: BLE001
+            return []
+    return []
+
+
+def _save_netliq(hist: list[dict], today: str, net_liq: float) -> list[dict]:
+    hist = [h for h in hist if h.get("date") != today]      # replace today's row if re-run
+    hist.append({"date": today, "net_liq": round(float(net_liq), 2)})
+    hist.sort(key=lambda h: h["date"])
+    try:
+        NETLIQ_HIST.parent.mkdir(parents=True, exist_ok=True)
+        NETLIQ_HIST.write_text(json.dumps(hist, indent=2))
+    except Exception:  # noqa: BLE001
+        pass
+    return hist
+
 
 def _pnl_series(state: dict) -> tuple[dict[str, float], float, str | None]:
     """{date -> since-inception P&L}, %-base, inception. Handles both state shapes."""
@@ -118,6 +147,12 @@ def _money(x) -> str:
 
 def build() -> tuple[str, str]:
     today = datetime.now().strftime("%Y-%m-%d")
+
+    # Account truth FIRST: the book P&L is derived from NetLiq so it ties to NAV exactly.
+    m = _ib_margin()
+    net_liq = m.get("NetLiquidation") if m else None
+
+    # Per-sleeve P&L from each sleeve's OWN ledger.
     sleeves = []
     series_all = []
     for label, path in (("Magic Formula", MAGIC_STATE), ("Trend Overlay", TREND_STATE)):
@@ -129,13 +164,46 @@ def build() -> tuple[str, str]:
             continue
         series_all.append(series)
         sleeves.append({"label": label, "inception": inception, "base": base,
-                        "daily": _daily(series), "total": _latest(series),
+                        "l_daily": _daily(series), "l_total": _latest(series),
                         "mdd": _max_drawdown(series)})
-    book = _combined(series_all)
-    book_row = {"label": "WHOLE BOOK", "inception": min((s["inception"] for s in sleeves
-                                                         if s["inception"]), default=today),
-                "base": None, "daily": _daily(book), "total": _latest(book),
-                "mdd": _max_drawdown(book)}
+    ledger_total_sum = sum(s["l_total"] for s in sleeves)
+    ledger_daily_sum = (sum(s["l_daily"] for s in sleeves)
+                        if sleeves and all(s["l_daily"] is not None for s in sleeves) else None)
+    book_since = min((s["inception"] for s in sleeves if s["inception"]), default=today)
+    sdates = sorted({d for s in series_all for d in s})
+
+    total_drift = daily_drift = 0.0
+    if net_liq is not None:
+        nl_series = {h["date"]: h["net_liq"] - INCEPTION_CAPITAL
+                     for h in _save_netliq(_load_netliq_hist(), today, net_liq)}
+        book_total = net_liq - INCEPTION_CAPITAL          # ties to NAV by construction
+        # Daily = the account's plain day-over-day NetLiq change (all costs/marking already in it),
+        # measured over the sleeves' latest interval so it lines up with their dailies. None until
+        # the NetLiq history (new) spans both dates.
+        book_daily = (nl_series[sdates[-1]] - nl_series[sdates[-2]]
+                      if len(sdates) >= 2 and sdates[-1] in nl_series and sdates[-2] in nl_series
+                      else None)
+        # Drawdown from the combined sleeve path (full history; NetLiq history is too new).
+        book_mdd = _max_drawdown(_combined(series_all))
+        total_drift = book_total - ledger_total_sum
+        if book_daily is not None and ledger_daily_sum is not None:
+            daily_drift = book_daily - ledger_daily_sum
+    else:
+        book = _combined(series_all)
+        book_total, book_daily, book_mdd = _latest(book), _daily(book), _max_drawdown(book)
+
+    # ATTRIBUTE the drift (FX financing, sweep commissions, yfinance-vs-IB marking) to the sleeve
+    # that INCURS it — magic-formula holds the foreign stock and does the FX sweeps; trend-overlay
+    # is IB-marked with negligible financing. Folding it into magic makes the two sleeves sum
+    # EXACTLY to the account (NetLiq - inception), so the book row is genuinely their total.
+    for s in sleeves:
+        mag = s["label"] == "Magic Formula"
+        s["total"] = s["l_total"] + (total_drift if mag else 0.0)
+        s["daily"] = ((s["l_daily"] + daily_drift) if (mag and s["l_daily"] is not None)
+                      else s["l_daily"])
+
+    book_row = {"label": "WHOLE BOOK", "inception": book_since, "base": INCEPTION_CAPITAL,
+                "daily": book_daily, "total": book_total, "mdd": book_mdd}
 
     def _row(s, bold=False):
         b = "font-weight:700;border-top:2px solid #334155" if bold else ""
@@ -153,7 +221,19 @@ def build() -> tuple[str, str]:
                f"<tr style='color:#64748b'><td style='padding-right:16px'>Sleeve</td><td>Daily P&amp;L</td>"
                f"<td>Since inception</td><td>Max drawdown</td><td>Since</td></tr>{rows}</table>")
 
-    m = _ib_margin()
+    recon_note = ""
+    if net_liq is not None:
+        recon_note = (f"<p style='color:#64748b;font-size:11px;margin:4px 0'>WHOLE BOOK = account "
+                      f"NetLiq − ${INCEPTION_CAPITAL:,.0f} inception capital (so NAV = ${INCEPTION_CAPITAL:,.0f} "
+                      f"+ book P&amp;L), and daily = the day's NetLiq change. The account-vs-ledger "
+                      f"difference ({_money(total_drift)} to date) — FX financing and sweep commissions "
+                      f"plus yfinance-vs-IB marking (either sign) — is attributed to magic-formula, where "
+                      f"it arises (trend is IB-marked), so the two sleeves sum to the book. Max drawdown "
+                      f"is each sleeve's own path and is not additive.</p>")
+        if book_daily is None:
+            recon_note += ("<p style='color:#64748b;font-size:11px;margin:4px 0'>Book daily shows &mdash; "
+                           "until the NetLiq history spans two trading days (new; fills from the 21:00 run).</p>")
+
     if m:
         nl, mm = m.get("NetLiquidation", 0.0), m.get("FullMaintMarginReq", 0.0)
         xl, gpv = m.get("ExcessLiquidity", 0.0), m.get("GrossPositionValue", 0.0)
@@ -174,11 +254,10 @@ def build() -> tuple[str, str]:
     Overlay (paper sleeves excluded).</p>
     <h3 style='color:#1a3c5e'>P&amp;L</h3>
     {pnl_tbl}
+    {recon_note}
     <h3 style='color:#1a3c5e'>Account risk</h3>
     {risk_tbl}
-    <p style='color:#64748b;font-size:11px;margin-top:14px'>Max drawdown is the largest peak-to-trough
-    fall of each sleeve's own P&amp;L curve since inception; the book row combines the sleeves by date.
-    Read-only summary — no orders placed.</p>
+    <p style='color:#64748b;font-size:11px;margin-top:14px'>Read-only summary — no orders placed.</p>
     </body></html>"""
 
     bdaily = book_row["daily"]
