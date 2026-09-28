@@ -141,9 +141,24 @@ def _refresh_marks(panels: dict, tickers: set[str]) -> dict:
 
 
 def _spy_returns(inception: str | None):
-    """(day_ret, since_inception_ret) for SPY."""
+    """(day_ret, since_inception_ret, latest_close) for SPY, on RAW (unadjusted) closes.
+
+    auto_adjust=False is deliberate and was a BUG when True. yfinance's adjusted series is
+    re-derived on EVERY fetch: when SPY pays a dividend the whole history is retroactively
+    scaled down, so the fixed inception bar (e.g. 2026-08-17) returned a DIFFERENT level each
+    run — ~0.56% lower six weeks in — with no market cause. That drift flowed straight into the
+    "since inception vs SPY" line, which then jumped day to day even when the strategy tracked
+    SPY almost exactly. Raw closes give a FIXED anchor (SPY does not split), so the since-
+    inception number only moves with the actual price path.
+
+    It also makes the comparison apples-to-apples: this book's NAV is PRICE return — it never
+    credits dividends — so SPY must be measured price-return too. The adjusted series was
+    handing SPY ~1.4%/yr of reinvested dividends the strategy does not receive. (Cost: on SPY's
+    own ex-dividend day the raw close dips by the dividend, a small one-day artifact; the
+    strategy's holdings take the same un-credited dip on THEIR ex-div days, so it stays fair.)
+    """
     try:
-        spy = yf.download("SPY", period="1y", auto_adjust=True, progress=False)["Close"].dropna()
+        spy = yf.download("SPY", period="1y", auto_adjust=False, progress=False)["Close"].dropna()
         spy = spy.iloc[:, 0] if hasattr(spy, "columns") else spy
         day = float(spy.iloc[-1] / spy.iloc[-2] - 1)
         incep = None
