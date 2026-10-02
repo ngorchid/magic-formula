@@ -130,11 +130,28 @@ def _refresh_marks(panels: dict, tickers: set[str]) -> dict:
     day = pd.Timestamp.today().normalize()
     if day not in adj.index:
         adj.loc[day] = np.nan
+    adj = adj.sort_index()
     n = 0
     for t in px.columns:
-        if t in adj.columns and px[t].notna().any():
-            adj.loc[day, t] = float(px[t].dropna().iloc[-1])
-            n += 1
+        if t not in adj.columns:
+            continue
+        s = px[t].dropna()
+        if s.empty:
+            continue
+        adj.loc[day, t] = float(s.iloc[-1])
+        # Refresh the PRIOR close too, from the SAME (split-adjusted) fetch. price_sane compares
+        # today's mark against adj.iloc[-2]: if the two sit on different split bases, a mid-month
+        # split reads as a ~50% crash and EVERY buy of that name is rejected until the monthly
+        # cache rebuilds. The monthly panel is frozen, so a split occurring after the last rebuild
+        # (APH 2:1 on 2026-09-03) leaves the cached prior pre-split while this live bar is post-
+        # split — a phantom 48% move. Overwriting the most recent prior bar with this fetch's own
+        # prior keeps both on one basis. A genuine bad print in today's bar still differs from the
+        # fresh prior, so the guard's real purpose is preserved.
+        if len(s) >= 2:
+            prior = adj.index[(adj.index < day) & adj[t].notna()]
+            if len(prior):
+                adj.loc[prior[-1], t] = float(s.iloc[-2])
+        n += 1
     panels["adj"] = adj.sort_index()
     logging.info("Refreshed today's prices for %d/%d names.", n, len(tickers))
     return panels
