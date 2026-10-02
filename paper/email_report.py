@@ -50,6 +50,21 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
         day_ret = (nav / prev - 1) if prev else None
         day_pnl = (nav - prev) if prev else None
 
+    # SPY returns from the SAME stored run-time snapshots as the NAV — NOT the freshly-fetched
+    # values passed in. The run fires at 16:00 CET ≈ 10:00 ET, 30 min into the US session, so every
+    # price here (NAV marks AND SPY) is an intraday snapshot. The NAV path is snapshot-to-snapshot;
+    # SPY must be too. Re-fetching compared today's partial bar against yesterday's SETTLED close
+    # (which drifts intraday — up to 0.7% on SPY), so the since-inception line moved by more than
+    # the day's move. Each stored `spy` is already a raw intraday close (we only ever stored
+    # iloc[-1], the current bar, which is unadjusted), so the stored series is self-consistent.
+    # The passed spy_*_ret remain as a fallback for the first run, before any snapshot pair exists.
+    if hist and hist[-1]["date"] == today and hist[-1].get("spy"):
+        spy_today = hist[-1]["spy"]
+        if len(hist) >= 2 and hist[-2].get("spy"):
+            spy_day_ret = spy_today / hist[-2]["spy"] - 1
+        if hist[0].get("spy"):
+            spy_incep_ret = spy_today / hist[0]["spy"] - 1
+
     # portfolio rows
     rows = []
     for p in sorted(state.positions, key=lambda x: x.ticker):
