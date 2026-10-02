@@ -248,10 +248,17 @@ def build() -> tuple[str, str]:
     else:
         risk_tbl = "<i>account margin unavailable (Gateway down?) — P&L above still valid</i>"
 
+    # Headline: the total portfolio value (= account NetLiquidation). Shown up top in plain dollars
+    # (unsigned — it's a value, not a P&L), with the same number repeated in the margin table below.
+    pv_str = f"${net_liq:,.0f}" if net_liq is not None else "—"
+    pv_line = (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
+               f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b></p>")
+
     body = f"""<html><body style='font-family:sans-serif;color:#1e293b'>
     <h2 style='color:#1a3c5e'>Live Book Summary — {today}</h2>
     <p style='color:#64748b;font-size:12px'>Real capital, account U27760647. Magic Formula + Trend
     Overlay (paper sleeves excluded).</p>
+    {pv_line}
     <h3 style='color:#1a3c5e'>P&amp;L</h3>
     {pnl_tbl}
     {recon_note}
@@ -261,7 +268,8 @@ def build() -> tuple[str, str]:
     </body></html>"""
 
     bdaily = book_row["daily"]
-    subject = (f"Live Book — {today}: day {_money(bdaily)}, total {_money(book_row['total'])}")
+    subject = (f"Live Book — {today}: value {pv_str}, day {_money(bdaily)}, "
+               f"total {_money(book_row['total'])}")
     return subject, body
 
 
