@@ -19,6 +19,14 @@ def _pct(x) -> str:
     return "—" if x is None else f"{x*100:+.2f}%"
 
 
+def _usd(x) -> str:
+    """A signed dollar figure, coloured green/red like the portfolio P/L cells."""
+    if x is None:
+        return "—"
+    col = "#1a7f37" if x >= 0 else "#b91c1c"
+    return f"<span style='color:{col}'>${x:+,.0f}</span>"
+
+
 def _table(headers, rows) -> str:
     th = "".join(f"<th style='text-align:left;padding:4px 10px;border-bottom:2px solid #1a3c5e'>{h}</th>" for h in headers)
     trs = ""
@@ -34,12 +42,13 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
     unreal = state.unrealized_pnl(marks, fx)
     nav = state.nav(marks, fx)
     total_ret = nav / state.inception_nav - 1 if state.inception_nav else None
-    # strategy day return from NAV history
+    # strategy day return AND absolute P&L from NAV history (prev = last recorded trading day)
     hist = state.nav_history
-    day_ret = None
+    day_ret = day_pnl = None
     if len(hist) >= 2 and hist[-1]["date"] == today:
         prev = hist[-2]["nav"]
         day_ret = (nav / prev - 1) if prev else None
+        day_pnl = (nav - prev) if prev else None
 
     # portfolio rows
     rows = []
@@ -65,7 +74,7 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
       <tr><td>Realized P/L</td><td>${state.realized_pnl:+,.0f}</td></tr>
       <tr><td>Unrealized P/L</td><td>${unreal:+,.0f}</td></tr>
       <tr><td>Cash</td><td>${state.cash:,.0f} &nbsp; ({len(state.positions)} positions)</td></tr>
-      <tr><td style='padding-top:8px'>Strategy today</td><td style='padding-top:8px'>{_pct(day_ret)} &nbsp; vs SPY {_pct(spy_day_ret)}</td></tr>
+      <tr><td style='padding-top:8px'>Strategy today</td><td style='padding-top:8px'>{_usd(day_pnl)} ({_pct(day_ret)}) &nbsp; vs SPY {_pct(spy_day_ret)}</td></tr>
       <tr><td>Strategy since inception</td><td>{_pct(total_ret)} &nbsp; vs SPY {_pct(spy_incep_ret)} &nbsp; (<b>{_pct(outperf)}</b> rel)</td></tr>
     </table>"""
 
