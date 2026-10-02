@@ -79,6 +79,60 @@ msft = out["MSFT"].dropna()
 expect("non-split name marks cleanly and passes",
        price_sane("MSFT", float(msft.iloc[-1]), float(msft.iloc[-2]), lim).ok)
 
+# --- split back-adjustment of the cached panel (vol / sizing de-distortion) -------------------
+# Build an ~80-bar series on a clean post-split basis, then make the pre-split half 2x larger to
+# mimic the frozen monthly cache that was never re-adjusted. _repair_splits must recover the
+# continuous path once yfinance confirms the split.
+dates = pd.bdate_range(end="2026-10-01", periods=80)
+true = pd.Series(np.linspace(80.0, 84.0, 80), index=dates)   # smooth, no real jumps
+ex = dates[40]
+cached = true.copy()
+cached.loc[cached.index < ex] *= 2.0                          # pre-split bars un-adjusted (2x)
+
+
+class _FakeTicker:
+    """Stand-in for yf.Ticker; .splits returns an authoritative 2:1 on the ex-date."""
+    def __init__(self, *a, **k):
+        pass
+
+    @property
+    def splits(self):
+        return pd.Series({pd.Timestamp(ex, tz="America/New_York"): 2.0})
+
+
+class _NoSplitTicker:
+    def __init__(self, *a, **k):
+        pass
+
+    @property
+    def splits(self):
+        return pd.Series(dtype=float)
+
+
+# BEFORE repair, the step is a ~-50% daily return that would wreck the 63-day vol.
+pre_rets = cached.pct_change().dropna()
+expect("setup: the un-adjusted cache has a split-sized daily return", pre_rets.abs().max() > 0.4)
+
+run_paper.yf.Ticker = _FakeTicker
+p = run_paper._repair_splits({"adj": pd.DataFrame({"APH": cached})}, {"APH"})
+got = p["adj"]["APH"]
+expect("confirmed split: pre-split bars divided by 2 -> continuous with the true path",
+       np.allclose(got.values, true.values, atol=1e-6))
+expect("confirmed split: no split-sized return remains (vol no longer distorted)",
+       got.pct_change().dropna().abs().max() < 0.1)
+
+# A genuine crash (same step, but yfinance reports NO split) must be left untouched.
+run_paper.yf.Ticker = _NoSplitTicker
+p2 = run_paper._repair_splits({"adj": pd.DataFrame({"XYZ": cached.copy()})}, {"XYZ"})
+expect("unconfirmed step (real crash) is NOT rescaled",
+       p2["adj"]["XYZ"].pct_change().dropna().abs().max() > 0.4)
+
+# Idempotent: re-running on an already-continuous series changes nothing and makes no yf call.
+run_paper.yf.Ticker = _FakeTicker
+p3 = run_paper._repair_splits({"adj": pd.DataFrame({"APH": true.copy()})}, {"APH"})
+expect("idempotent: a continuous series is left unchanged",
+       np.allclose(p3["adj"]["APH"].values, true.values, atol=1e-9))
+
 print("=" * 70)
 print(f"{ran} ran, {'ALL PASS' if not fails else f'{len(fails)} FAIL: ' + ', '.join(fails)}")
 if fails:

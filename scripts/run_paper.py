@@ -157,6 +157,67 @@ def _refresh_marks(panels: dict, tickers: set[str]) -> dict:
     return panels
 
 
+def _repair_splits(panels: dict, tickers: set[str], lookback: int = 70) -> dict:
+    """Back-adjust the monthly-cached panel for a split that landed AFTER the last rebuild.
+
+    The cache is frozen between monthly rebuilds and is NOT re-split-adjusted. A mid-month split
+    therefore leaves a ~2x step in the series: the bars `_refresh_marks` has patched since the
+    split are post-split, the older cached bars are pre-split. `_refresh_marks` repairs the 2-bar
+    price-sanity comparison, but `_annual_vol`'s 63-day window and the gross / inverse-vol sizing
+    read the whole step as one enormous daily return — inflating that name's vol, shrinking its
+    tilt, and dragging the blended gross scalar. (Momentum ranking is unaffected: it is rebuilt
+    monthly from a fresh split-adjusted pull, not from this cached panel.)
+
+    We find the step on the SMALL refreshed set, CONFIRM it is a real split via yfinance's
+    authoritative actions — never from the price alone, since a genuine -50% crash must not be
+    silently rescaled — and divide every pre-split bar by the split ratio. Idempotent: once the
+    series is continuous the step is gone and nothing re-triggers, so re-running is a no-op.
+    """
+    adj = panels.get("adj")
+    if adj is None:
+        return panels
+    repaired = 0
+    for t in sorted(tickers):
+        if t not in adj.columns:
+            continue
+        s = adj[t].dropna()
+        if len(s) < 3:
+            continue
+        tail = s.tail(lookback)
+        ratios = (tail.shift(1) / tail).dropna()          # prev/current; ~2.0 at a 2:1 split
+        cand = ratios[(ratios > 1.35) | (ratios < 1.0 / 1.35)]   # steps past the price-sanity band
+        if cand.empty:
+            continue
+        try:
+            splits = yf.Ticker(t).splits
+        except Exception as e:                                    # noqa: BLE001
+            logging.warning("split check failed for %s: %s — vol may stay distorted", t, e)
+            continue
+        if splits is None or len(splits) == 0:
+            continue                                             # a real move, not a split — leave it
+        sp_idx = pd.DatetimeIndex(splits.index)
+        sp_idx = sp_idx.tz_convert(None) if sp_idx.tz is not None else sp_idx
+        sp = pd.Series(splits.values, index=sp_idx.normalize())
+        for jump_date in cand.index:
+            d = pd.Timestamp(jump_date).normalize()
+            near = sp[(sp.index >= d - pd.Timedelta(days=5)) & (sp.index <= d + pd.Timedelta(days=5))]
+            if near.empty:
+                continue                                         # not a split — don't touch it
+            ratio, ex = float(near.iloc[-1]), near.index[-1]
+            if ratio <= 0:
+                continue
+            pre = adj.index < ex
+            adj.loc[pre, t] = adj.loc[pre, t] / ratio
+            repaired += 1
+            logging.warning("SPLIT-ADJUSTED %s: divided %d pre-%s bars by %.3g — the monthly "
+                            "cache was not re-adjusted for the mid-month split", t,
+                            int(pre.sum()), ex.date(), ratio)
+            break                                                # one split per name per run
+    if repaired:
+        panels["adj"] = adj.sort_index()
+    return panels
+
+
 def _spy_returns(inception: str | None):
     """(day_ret, since_inception_ret, latest_close) for SPY, on RAW (unadjusted) closes.
 
@@ -221,6 +282,9 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # Daily light refresh: current prices for held names + top candidates (marks/sizing/P&L).
     refresh_set = state.tickers | set(list(ranking.index)[:100])
     panels = _refresh_marks(panels, refresh_set)
+    # Back-adjust the cached panel for any split that landed after the last monthly rebuild, so the
+    # 63-day vol window and the inverse-vol / gross sizing do not read the split step as a return.
+    panels = _repair_splits(panels, refresh_set)
     fx = _fx_to_usd(set(panels["currency"].values()))
 
     # CIRCUIT BREAKER / STALENESS run AFTER the refresh above: both read `panels` (prices) and the
