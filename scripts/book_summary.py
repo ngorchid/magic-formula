@@ -15,7 +15,8 @@ Read-only: it places no orders. It connects to IB purely to read account margin.
 across accounts.
 
 Run (from the magic-formula-live venv):  python scripts/book_summary.py
-Env: TREND_STATE (path to trend-overlay-live state.json), TREND_BASE (its % base, default 75000).
+Env: TREND_STATE (path to trend-overlay-live state.json), TREND_BASE (its % base, default 75000),
+OPTIONS_STATE (path to options-vrp-live state.json), OPTIONS_BASE (its % base, default 50000).
 """
 from __future__ import annotations
 
@@ -43,6 +44,9 @@ MAGIC_STATE = ROOT / "results" / "paper" / "state.json"
 TREND_STATE = Path(os.getenv("TREND_STATE",
     r"C:\Users\Nicolas\PycharmProjects\trend-overlay-live\results\paper\state.json"))
 TREND_BASE = float(os.getenv("TREND_BASE", "75000"))   # 50k budget x 1.5 overlay = effective sizing
+OPTIONS_STATE = Path(os.getenv("OPTIONS_STATE",
+    r"C:\Users\Nicolas\PycharmProjects\options-vrp-live\results\paper\state.json"))
+OPTIONS_BASE = float(os.getenv("OPTIONS_BASE", "50000"))   # live BUDGET base (for % drawdown)
 
 # The book's inception CAPITAL — the account's funded size when magic-formula went live
 # (2026-08-17). Book P&L since inception is (live NetLiq - this), so NAV ties to
@@ -74,18 +78,43 @@ def _save_netliq(hist: list[dict], today: str, net_liq: float) -> list[dict]:
     return hist
 
 
-def _pnl_series(state: dict) -> tuple[dict[str, float], float, str | None]:
-    """{date -> since-inception P&L}, %-base, inception. Handles both state shapes."""
+def _pnl_series(state: dict, base_default: float) -> tuple[dict[str, float], float, str | None]:
+    """{date -> since-inception P&L}, %-base, inception. Handles all three sleeve shapes.
+
+    magic-formula: nav_history = [{date, nav, ...}] (equity; P&L = nav - inception_nav).
+    trend-overlay: nav_history = [{date, total_pnl}].
+    options-vrp:   nav_history = [[date, total_pnl]] (list/tuple pairs, not dicts).
+    """
     nh = state.get("nav_history", [])
     inception = state.get("inception_date")
-    if nh and "nav" in nh[0]:                       # magic-formula: equity series
+    if not nh:
+        return {}, base_default, inception
+    first = nh[0]
+    if isinstance(first, dict) and "nav" in first:          # magic-formula: equity series
         base = float(state.get("inception_nav") or 0.0) or 1.0
         series = {h["date"]: float(h["nav"]) - base for h in nh if h.get("nav") is not None}
         return series, base, inception
-    # trend-overlay: P&L series
-    series = {h["date"]: float(h["total_pnl"]) for h in nh
-              if h.get("total_pnl") is not None}
-    return series, TREND_BASE, inception
+    if isinstance(first, dict):                             # trend-overlay: {date, total_pnl}
+        series = {h["date"]: float(h["total_pnl"]) for h in nh if h.get("total_pnl") is not None}
+        return series, base_default, inception
+    # options-vrp: [date, total_pnl] pairs
+    series = {h[0]: float(h[1]) for h in nh if len(h) >= 2 and h[1] is not None}
+    return series, base_default, inception
+
+
+def _options_margin(path) -> float | None:
+    """Defined-risk collateral held by the options-vrp sleeve: sum of each spread's max loss
+    (= (strike width − entry credit) × 100 × contracts), which IS the Reg-T/maintenance margin
+    for a vertical credit spread. Computed from the sleeve's own book — per-strategy margin is not
+    separable from the shared account otherwise. None if the state is absent/unreadable."""
+    if not Path(path).exists():
+        return None
+    try:
+        st = json.loads(Path(path).read_text())
+        return sum((abs(sp["short_strike"] - sp["long_strike"]) - sp["entry_credit"])
+                   * 100 * sp["contracts"] for sp in st.get("open_spreads", []))
+    except Exception:                                       # noqa: BLE001
+        return None
 
 
 def _daily(series: dict[str, float]) -> float | None:
@@ -155,11 +184,13 @@ def build() -> tuple[str, str]:
     # Per-sleeve P&L from each sleeve's OWN ledger.
     sleeves = []
     series_all = []
-    for label, path in (("Magic Formula", MAGIC_STATE), ("Trend Overlay", TREND_STATE)):
+    for label, path, base_default in (("Magic Formula", MAGIC_STATE, 0.0),
+                                      ("Trend Overlay", TREND_STATE, TREND_BASE),
+                                      ("Options VRP", OPTIONS_STATE, OPTIONS_BASE)):
         if not Path(path).exists():
             continue
         st = json.loads(Path(path).read_text())
-        series, base, inception = _pnl_series(st)
+        series, base, inception = _pnl_series(st, base_default)
         if not series:
             continue
         series_all.append(series)
@@ -234,15 +265,19 @@ def build() -> tuple[str, str]:
             recon_note += ("<p style='color:#64748b;font-size:11px;margin:4px 0'>Book daily shows &mdash; "
                            "until the NetLiq history spans two trading days (new; fills from the 21:00 run).</p>")
 
+    opt_margin = _options_margin(OPTIONS_STATE)   # options-vrp's own defined-risk collateral
     if m:
         nl, mm = m.get("NetLiquidation", 0.0), m.get("FullMaintMarginReq", 0.0)
         xl, gpv = m.get("ExcessLiquidity", 0.0), m.get("GrossPositionValue", 0.0)
         util = mm / nl if nl else 0.0
+        opt_cell = (f"${opt_margin:,.0f} ({(opt_margin/nl if nl else 0):.0%} of NetLiq)"
+                    if opt_margin is not None else "—")
         risk_tbl = (
             f"<table style='border-collapse:collapse;font-family:monospace;font-size:13px'>"
             f"<tr><td style='padding:2px 16px 2px 0'>Net liquidation</td><td>${nl:,.0f}</td></tr>"
             f"<tr><td>Gross position value</td><td>${gpv:,.0f}</td></tr>"
             f"<tr><td>Maintenance margin (used)</td><td>${mm:,.0f} ({util:.0%} of NetLiq)</td></tr>"
+            f"<tr><td>&nbsp;&nbsp;↳ Options VRP margin</td><td>{opt_cell}</td></tr>"
             f"<tr><td>Excess liquidity (buffer)</td><td style='color:{'#1a7f37' if xl > 0.15*nl else '#b45309'}'>"
             f"${xl:,.0f} ({(xl/nl if nl else 0):.0%})</td></tr></table>")
     else:
@@ -257,7 +292,7 @@ def build() -> tuple[str, str]:
     body = f"""<html><body style='font-family:sans-serif;color:#1e293b'>
     <h2 style='color:#1a3c5e'>Live Book Summary — {today}</h2>
     <p style='color:#64748b;font-size:12px'>Real capital, account U27760647. Magic Formula + Trend
-    Overlay (paper sleeves excluded).</p>
+    Overlay + Options VRP.</p>
     {pv_line}
     <h3 style='color:#1a3c5e'>P&amp;L</h3>
     {pnl_tbl}
