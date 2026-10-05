@@ -132,6 +132,7 @@ class Broker:
             try:
                 self.ib.connect(self.host, self.port, clientId=self.client_id, timeout=15)
                 logging.info("IB connected (clientId %s, port %s).", self.client_id, self.port)
+                self._await_account_data()
                 return True
             except Exception as e:  # noqa: BLE001
                 logging.warning("IB connect attempt %d/%d failed: %s", attempt, max_retries, e)
@@ -141,6 +142,33 @@ class Broker:
                     time.sleep(startup_wait)
                 else:
                     time.sleep(10)
+        return False
+
+    def _await_account_data(self, wait: float = 30.0) -> bool:
+        """Wait for the account-updates feed (cash balances, portfolio) to populate.
+
+        A Gateway that has only just logged in — e.g. the health check's auto-restart landing
+        seconds before the run (2026-10-05: login 16:00:23, run connected 16:00:25) — accepts the
+        connection before it has loaded the account, so ib_insync's startup sync logs "account
+        updates request timed out" and accountValues() stays empty. That silently skipped the FX
+        sweep. The subscription is still live, so poll for it, re-subscribing once halfway.
+        """
+        if self.ib.accountValues():
+            return True
+        logging.info("account data not loaded yet — waiting up to %.0fs (fresh Gateway?)", wait)
+        accts = self.ib.managedAccounts()
+        waited, resubscribed = 0.0, False
+        while waited < wait:
+            self.ib.sleep(1.0)
+            waited += 1.0
+            if self.ib.accountValues():
+                logging.info("account data loaded after %.0fs", waited)
+                return True
+            if not resubscribed and waited >= wait / 2 and accts:
+                self.ib.client.reqAccountUpdates(True, accts[0])
+                resubscribed = True
+        logging.warning("account data still unavailable after %.0fs — cash balances and FX "
+                        "sweep will be skipped this run", wait)
         return False
 
     def disconnect(self) -> None:
@@ -200,15 +228,19 @@ class Broker:
 
         Returns None (not {}) when it cannot be read, so the caller can distinguish "flat" from
         "could not check"; an empty dict would make every held position look like a phantom.
+
+        Reads positions(), NOT portfolio(): portfolio() rides the account-updates feed, which a
+        freshly started Gateway may not have loaded yet — on 2026-10-05 it came back empty and
+        all 30 holdings were reported PHANTOM while positions() had every one of them.
         """
         if getattr(self, "dry_run", False) or self.ib is None:
             return None
         try:
             out: dict[str, float] = {}
-            for it in self.ib.portfolio():
-                c = it.contract
-                if c.secType == "STK" and it.position:
-                    out[c.symbol] = out.get(c.symbol, 0.0) + float(it.position)
+            for p in self.ib.positions():
+                c = p.contract
+                if c.secType == "STK" and p.position:
+                    out[c.symbol] = out.get(c.symbol, 0.0) + float(p.position)
             return out
         except Exception as e:  # noqa: BLE001
             logging.warning("stock_positions failed: %s", e)
