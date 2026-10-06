@@ -77,6 +77,9 @@ TABLES = {
     "Order":                ("orders",            ("ibOrderID", "orderReference", "dateTime")),
     "UnbundledCommissionDetail": ("commission_details", ("tradeID", "brokerExecutionCharge",
                                                           "dateTime", "exchange")),
+    # Transaction TAXES (UK stamp duty, Italian/French FTT, ...) — not in the commission columns.
+    "TransactionTax":       ("transaction_taxes", ("tradeId", "transactionID", "date", "taxDescription",
+                                                    "taxAmount")),
     "CashTransaction":      ("cash_transactions", ("transactionID",)),
     "StatementOfFundsLine": ("statement_of_funds", ("transactionID", "date", "activityCode",
                                                     "currency", "amount", "balance")),

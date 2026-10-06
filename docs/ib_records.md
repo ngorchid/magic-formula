@@ -21,32 +21,39 @@ Performance & Reports → Flex Queries → **Activity Flex Query → +**
 | Date/time separator | `;` | |
 | Profit and Loss | Default | |
 | Include Canceled Trades | **Yes** | busted/cancelled executions are part of the trail |
-| Include Currency Rates | **Yes** | converts every row to base currency |
+| Include Currency Rates (if offered) | **Yes** | redundant with the *Currency Conversion Rate* section below, which is what matters |
 | **Include Audit Trail Fields** | **Yes** | **required** — without it IB omits `orderReference`, and trades cannot be attributed to a strategy |
 | Display Account Alias in Place of Account ID | No | |
 | Breakout by Day | **Yes** | one NAV/summary row per day instead of one per period |
 
-**Sections — tick each, and "Select All" fields inside each**
+**Sections — tick ONLY these (names exactly as IB lists them), and "Select All" fields inside each**
 
 | Section | What it gives the audit trail |
 |---|---|
 | Account Information | account identity, base currency, capabilities |
 | **Trades** — tick *Executions*, *Orders* and *Closed Lots* | every fill: price, qty, commission, fees, `orderReference`, IB order/exec ids, time |
-| Commission Details (Unbundled) | exchange/clearing/regulatory fee breakdown per execution |
+| Commission Details | exchange/clearing/regulatory fee breakdown per execution |
+| **Transaction Fees** | transaction TAXES (UK stamp duty, Italian/French FTT, …) — not in the commission columns |
 | **Cash Transactions** | dividends, withholding tax, interest, fees, deposits/withdrawals |
 | **Statement of Funds** | complete cash ledger with running balance — ties every cash change to its cause |
 | Cash Report | cash by currency (start/end) |
 | **Open Positions** | end-of-day positions and cost basis |
-| Net Asset Value (NAV) in Base | daily NAV (with Breakout by Day) |
+| Net Asset Value (NAV) Summary in Base | daily NAV (with Breakout by Day) |
 | Change in NAV | NAV bridge: trading, fees, dividends, interest, deposits |
-| Realized and Unrealized Performance Summary | P&L per instrument |
+| Realized and Unrealized Performance Summary in Base | P&L per instrument |
 | Corporate Actions | splits, mergers, spin-offs |
-| Transfers | incoming/outgoing security and cash transfers |
-| Option Exercises, Assignments and Expirations | options-vrp lifecycle |
+| Transfers (ACATS, Internal) | security and cash transfers in/out |
+| Incoming/Outgoing Trade Transfers | trades moved between accounts/brokers |
+| Options, Exercises, Assignments and Expirations | options-vrp lifecycle |
 | Interest Accruals | interest earned/charged by currency |
-| Change in Dividend Accruals / Open Dividend Accruals | dividends declared but not yet paid |
+| Change in Dividend Accruals | dividends declared, accrued, reversed |
+| Open Dividend Accruals | dividends declared but not yet paid |
 | Financial Instrument Information | contract details (conid, multiplier, expiry) for every symbol |
-| Conversion Rates | the FX rates IB used |
+| Currency Conversion Rate | the FX rates IB used, versus base currency |
+
+All other sections (securities lending, borrow fees, soft dollars, debit card, models, …) do not
+apply to this account. Ticking one is harmless — it just comes back empty — so when unsure,
+include it: too much is safe, too little is not.
 
 Save it and note the **Query ID** (shown in the query list).
 
