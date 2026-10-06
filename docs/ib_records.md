@@ -21,7 +21,7 @@ Performance & Reports → Flex Queries → **Activity Flex Query → +**
 | Date/time separator | `;` | |
 | Profit and Loss | Default | |
 | Include Canceled Trades | **Yes** | busted/cancelled executions are part of the trail |
-| Include Currency Rates (if offered) | **Yes** | redundant with the *Currency Conversion Rate* section below, which is what matters |
+| Include Currency Rates | **Yes** | the daily FX-rates table (this account has no separate section for it) |
 | **Include Audit Trail Fields** | **Yes** | **required** — without it IB omits `orderReference`, and trades cannot be attributed to a strategy |
 | Display Account Alias in Place of Account ID | No | |
 | Breakout by Day | **Yes** | one NAV/summary row per day instead of one per period |
@@ -59,11 +59,13 @@ Recommended additions (reviewed against the first real statement, 2026-10-06):
 | Mark-to-Market Performance Summary in Base | IB's daily P&L per instrument = per sleeve (instruments don't overlap) |
 | Forex Balances, Forex P/L Details | foreign cash balances and realised/unrealised FX P&L (FX sweeps; tax) |
 | Interest Details (Tiers) | how margin interest per currency/tier was computed |
-| Codes | legend for row codes (C = closing, O = opening, …) |
 | Complex Position Summary (optional) | options-vrp spreads as combined positions |
 
-This account's Flex UI offers no *Currency Conversion Rate* section; every row carries
-`fxRateToBase` (the rate IB applied), which covers it.
+This account's Flex UI offers no *Currency Conversion Rate* section and no *Codes* section (a
+static legend — the codes are in IB's reference guide). Daily FX rates come from the general
+configuration question **"Include currency rates?" → Yes**: every row already carries
+`fxRateToBase`, but only the rates table lets a foreign balance be valued on a day with no
+transaction in that currency.
 
 **Timestamps are US/Eastern** (e.g. `20261005;143014` = the 20:30 CET trend run). The XML does not
 state the zone — convert before comparing with the CET run logs.
