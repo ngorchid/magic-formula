@@ -1,0 +1,95 @@
+# IB records archive — setup
+
+`scripts/download_ib_records.py` downloads IB's own records for the live account (U27760647)
+every day via the Flex Web Service and archives them unchanged. Together with the
+`orderRef = "<strategy>:<run id>"` tag on every order (since 2026-10-06), this gives a full audit
+trail: every execution, fee and cash movement from IB, attributable to a strategy and to the run
+(and its `run.log` section) that placed it.
+
+## 1. Create the Activity Flex Query (Client Portal, once)
+
+Performance & Reports → Flex Queries → **Activity Flex Query → +**
+
+**Delivery configuration**
+
+| Setting | Value | Why |
+|---|---|---|
+| Accounts | U27760647 | the live account |
+| Format | **XML** | the script parses XML |
+| Period | **Last 7 Calendar Days** | rolling overlap: a missed day or a late correction is still captured |
+| Date format / Time format | `yyyyMMdd` / `HHmmss` | sortable; the script's checks assume `yyyyMMdd` |
+| Date/time separator | `;` | |
+| Profit and Loss | Default | |
+| Include Canceled Trades | **Yes** | busted/cancelled executions are part of the trail |
+| Include Currency Rates | **Yes** | converts every row to base currency |
+| **Include Audit Trail Fields** | **Yes** | **required** — without it IB omits `orderReference`, and trades cannot be attributed to a strategy |
+| Display Account Alias in Place of Account ID | No | |
+| Breakout by Day | **Yes** | one NAV/summary row per day instead of one per period |
+
+**Sections — tick each, and "Select All" fields inside each**
+
+| Section | What it gives the audit trail |
+|---|---|
+| Account Information | account identity, base currency, capabilities |
+| **Trades** — tick *Executions*, *Orders* and *Closed Lots* | every fill: price, qty, commission, fees, `orderReference`, IB order/exec ids, time |
+| Commission Details (Unbundled) | exchange/clearing/regulatory fee breakdown per execution |
+| **Cash Transactions** | dividends, withholding tax, interest, fees, deposits/withdrawals |
+| **Statement of Funds** | complete cash ledger with running balance — ties every cash change to its cause |
+| Cash Report | cash by currency (start/end) |
+| **Open Positions** | end-of-day positions and cost basis |
+| Net Asset Value (NAV) in Base | daily NAV (with Breakout by Day) |
+| Change in NAV | NAV bridge: trading, fees, dividends, interest, deposits |
+| Realized and Unrealized Performance Summary | P&L per instrument |
+| Corporate Actions | splits, mergers, spin-offs |
+| Transfers | incoming/outgoing security and cash transfers |
+| Option Exercises, Assignments and Expirations | options-vrp lifecycle |
+| Interest Accruals | interest earned/charged by currency |
+| Change in Dividend Accruals / Open Dividend Accruals | dividends declared but not yet paid |
+| Financial Instrument Information | contract details (conid, multiplier, expiry) for every symbol |
+| Conversion Rates | the FX rates IB used |
+
+Save it and note the **Query ID** (shown in the query list).
+
+## 2. Create the Flex Web Service token
+
+Performance & Reports → Flex Queries → **Flex Web Service Configuration** (gear icon) → enable →
+**Generate New Token**. Choose the longest validity offered and, if you like, restrict it to this
+PC's public IP. Tokens **expire**: the script emails `1012 Token has expired` when it does — then
+generate a new one and update `.env`.
+
+## 3. Configure `.env` (live checkout, never committed)
+
+```
+FLEX_TOKEN=<token>
+FLEX_QUERY_ID=<query id>
+EXPECT_ACCOUNT=U27760647
+```
+
+## 4. Run / schedule
+
+`scripts\download_ib_records.bat` (logs to `logs\ib_records.log`); scheduled task
+`IBRecordsDownload` runs it daily. Activity statements cover the previous business day once IB's
+overnight processing is done, so the run is in the morning; codes 1005–1008 ("processing
+pending") are transient and the next run's 7-day window picks the data up anyway.
+
+## Storage — `C:\Users\Nicolas\IB-records` (override with `IB_RECORDS_DIR`)
+
+```
+raw/YYYY/flex_<query>_<from>_<to>_<downloaded>.xml   immutable, exactly as IB sent it (write-once)
+manifest.jsonl                                      append-only: file, sha256, bytes, period, account
+tables/*.csv                                        derived from ALL raw files each run; disposable
+```
+
+- Raw files are never modified; verify any of them against its `sha256` in the manifest.
+- `tables/trades.csv` adds `strategy` and `run_id` (parsed from `orderReference`) and keeps the
+  latest version of each IB trade id, so IB corrections replace the earlier record.
+- `--rebuild` regenerates the tables offline from raw.
+- The folder lives outside every checkout so a re-clone can't touch it. **It is not yet backed
+  up** — it should be (it is the books of record).
+
+## Alerts (email, failure only)
+
+- download failed (with the IB error code; transient ones say so)
+- statement for an unexpected account
+- audit trail incomplete: no `orderReference` column (audit trail fields off), a trade since
+  2026-10-06 without a strategy tag (manual trade?), or a required section missing
