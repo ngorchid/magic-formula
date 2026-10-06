@@ -94,6 +94,19 @@ TABLES = {
     "StatementOfFundsLine": ("statement_of_funds", ("transactionID", "date", "activityCode",
                                                     "currency", "amount", "balance")),
     "OpenPosition":         ("open_positions",    ("reportDate", "conid", "currency")),
+    # Daily price + MTM per held instrument (NB: IB gives no quantity here; open_positions has it).
+    "PriorPeriodPosition":  ("daily_positions",   ("date", "conid")),
+    "MTMPerformanceSummaryUnderlying": ("mtm_performance", ("conid", "symbol", "description",
+                                                             "_period")),
+    # Foreign-cash balances and their realised FX P&L. FxTransaction has no IB id, so the
+    # natural key is used; raw keeps every row regardless.
+    "FxPosition":           ("fx_positions",      ("reportDate", "fxCurrency", "levelOfDetail",
+                                                   "lotOpenDateTime", "lotDescription")),
+    "FxTransaction":        ("fx_transactions",   ("reportDate", "fxCurrency", "dateTime",
+                                                   "activityDescription", "quantity", "proceeds",
+                                                   "levelOfDetail")),
+    "TierInterestDetail":   ("interest_tiers",    ("reportDate", "valueDate", "currency",
+                                                   "interestType", "tierBreak")),
     "EquitySummaryByReportDateInBase": ("nav_daily", ("reportDate",)),
     "ChangeInNAV":          ("change_in_nav",     ("fromDate", "toDate", "_period")),
     "CorporateAction":      ("corporate_actions", ("transactionID",)),
