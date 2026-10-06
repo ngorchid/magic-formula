@@ -71,10 +71,20 @@ IN_PROGRESS = {"1019"}
 RETRY_LATER = {"1001", "1004", "1005", "1006", "1007", "1008", "1009", "1018", "1021"}
 
 # Derived tables: XML element -> (csv name, unique-key attributes for de-duplication).
-# The key is IB's own id where one exists; otherwise the natural key of a daily row.
+# The key is IB's own id where one exists; otherwise the natural key of a daily row. PERIOD
+# summaries (cash report, performance, NAV bridge) describe the statement's whole window, which
+# differs on every rolling download -- their key includes "_period" so each window is kept
+# rather than one overwriting another. Element names verified on the first real statement
+# (2026-10-06).
 TABLES = {
+    "AccountInformation":   ("account_information", ("accountId", "_period")),
     "Trade":                ("trades",            ("tradeID", "transactionID", "ibExecID")),
     "Order":                ("orders",            ("ibOrderID", "orderReference", "dateTime")),
+    "Lot":                  ("closed_lots",       ("transactionID", "conid", "dateTime", "openDateTime",
+                                                   "quantity")),
+    "CashReportCurrency":   ("cash_report",       ("currency", "levelOfDetail", "_period")),
+    "FIFOPerformanceSummaryUnderlying": ("performance_summary", ("conid", "symbol", "description",
+                                                                  "_period")),
     "UnbundledCommissionDetail": ("commission_details", ("tradeID", "brokerExecutionCharge",
                                                           "dateTime", "exchange")),
     # Transaction TAXES (UK stamp duty, Italian/French FTT, ...) — not in the commission columns.
@@ -85,7 +95,7 @@ TABLES = {
                                                     "currency", "amount", "balance")),
     "OpenPosition":         ("open_positions",    ("reportDate", "conid", "currency")),
     "EquitySummaryByReportDateInBase": ("nav_daily", ("reportDate",)),
-    "ChangeInNAV":          ("change_in_nav",     ("fromDate", "toDate")),
+    "ChangeInNAV":          ("change_in_nav",     ("fromDate", "toDate", "_period")),
     "CorporateAction":      ("corporate_actions", ("transactionID",)),
     "Transfer":             ("transfers",         ("transactionID",)),
     "OptionEAE":            ("option_exercises",  ("transactionID", "date", "conid")),
@@ -184,15 +194,25 @@ def rebuild_tables() -> dict[str, int]:
     corrected record from IB replaces the earlier version of the same id."""
     files = sorted((RECORDS / "raw").rglob("*.xml"))
     rows: dict[str, dict[tuple, dict]] = {name: {} for name, _ in TABLES.values()}
+    unmapped: dict[str, int] = {}
     for p in files:
-        root = ET.parse(p).getroot()
-        for tag, (name, key) in TABLES.items():
-            for el in root.iter(tag):
-                a = dict(el.attrib)
-                if tag == "Trade":
-                    a["strategy"], a["run_id"] = _split_ref(a.get("orderReference", ""))
-                a["_source_file"] = p.name
-                rows[name][tuple(a.get(k, "") for k in key)] = a
+        for stmt in ET.parse(p).getroot().iter("FlexStatement"):
+            period = f"{stmt.get('fromDate', '')}-{stmt.get('toDate', '')}"
+            # Record types IB sent that no table maps: still safe in raw, but say so, so a newly
+            # ticked section never silently stays out of the tables.
+            for sec in stmt:
+                for el in [sec, *sec]:
+                    if el.attrib and el.tag not in TABLES:
+                        unmapped[el.tag] = unmapped.get(el.tag, 0) + 1
+            for tag, (name, key) in TABLES.items():
+                for el in stmt.iter(tag):
+                    if not el.attrib:     # a section CONTAINER sharing the row's tag (e.g. an
+                        continue          # empty <OptionEAE/>) -- not a record
+                    a = dict(el.attrib)
+                    if tag == "Trade":
+                        a["strategy"], a["run_id"] = _split_ref(a.get("orderReference", ""))
+                    a["_period"], a["_source_file"] = period, p.name
+                    rows[name][tuple(a.get(k, "") for k in key)] = a
     out_dir = RECORDS / "tables"
     out_dir.mkdir(parents=True, exist_ok=True)
     counts = {}
@@ -207,6 +227,9 @@ def rebuild_tables() -> dict[str, int]:
             w.writeheader()
             w.writerows(recs.values())
         counts[name] = len(recs)
+    if unmapped:
+        log("in raw but not tabled (add to TABLES if needed): "
+            + ", ".join(f"{k} {v}" for k, v in sorted(unmapped.items())))
     return counts
 
 
