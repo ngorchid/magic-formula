@@ -51,6 +51,23 @@ Performance & Reports → Flex Queries → **Activity Flex Query → +**
 | Financial Instrument Information | contract details (conid, multiplier, expiry) for every symbol |
 | Currency Conversion Rate | the FX rates IB used, versus base currency |
 
+Recommended additions (reviewed against the first real statement, 2026-10-06):
+
+| Section | Why |
+|---|---|
+| Prior Period Positions | positions for EVERY day — otherwise a missed run leaves a gap in daily positions |
+| Mark-to-Market Performance Summary in Base | IB's daily P&L per instrument = per sleeve (instruments don't overlap) |
+| Forex Balances, Forex P/L Details | foreign cash balances and realised/unrealised FX P&L (FX sweeps; tax) |
+| Interest Details (Tiers) | how margin interest per currency/tier was computed |
+| Codes | legend for row codes (C = closing, O = opening, …) |
+| Complex Position Summary (optional) | options-vrp spreads as combined positions |
+
+This account's Flex UI offers no *Currency Conversion Rate* section; every row carries
+`fxRateToBase` (the rate IB applied), which covers it.
+
+**Timestamps are US/Eastern** (e.g. `20261005;143014` = the 20:30 CET trend run). The XML does not
+state the zone — convert before comparing with the CET run logs.
+
 All other sections (securities lending, borrow fees, soft dollars, debit card, models, …) do not
 apply to this account. Ticking one is harmless — it just comes back empty — so when unsure,
 include it: too much is safe, too little is not.
