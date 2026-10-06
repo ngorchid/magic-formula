@@ -202,6 +202,179 @@ def _split_ref(ref: str) -> tuple[str, str]:
     return "", ""
 
 
+# ---------------------------------------------------------------------------------------------
+# ATTRIBUTION — which sleeve does each cash event belong to? (owner's rules, 2026-10-06)
+#
+# Every row of IB's cash ledger lands in exactly one bucket, so the buckets add up to the
+# account's change in NAV:
+#   instrument events (dividends, withholding, corporate actions, option exercise/expiry,
+#   futures variation margin, transaction taxes) -> the sleeve that holds the instrument: by the
+#       orderReference of the tagged trade that traded it, else by asset class (each sleeve
+#       trades its own class: STK/CASH -> magic-formula, FUT -> trend-overlay, OPT -> vrp)
+#   SYEP securities-lending income    -> magic-formula (the only sleeve holding stock)
+#   interest in a FOREIGN currency    -> magic-formula (its stocks + FX sweeps create those
+#                                        balances)
+#   interest in the BASE currency     -> book    (the shared USD pool belongs to no sleeve)
+#   market-data subscription fees     -> options-vrp (OPRA exists for it)
+#   other account fees                -> book
+#   deposits / withdrawals            -> capital (flows, not P&L)
+#   anything else                     -> unassigned -> audit alert
+# ---------------------------------------------------------------------------------------------
+ASSET_SLEEVE = {"STK": "magic-formula", "CASH": "magic-formula", "FUT": "trend-overlay",
+                "OPT": "options-vrp", "BAG": "options-vrp"}
+MARKET_DATA_WORDS = ("OPRA", "SNAPSHOT", "MARKET DATA", "TOP OF BOOK", "BUNDLE", "NETWORK A",
+                     "NETWORK B", "NETWORK C", "NP,L1", "NON-PROFESSIONAL")
+SYEP_WORDS = ("SYEP", "MANAGED SECURITIES", "SECURITIES LENT", "LENDING")
+CASH_TYPE_CATEGORY = {
+    "Dividends": "dividend", "Payment In Lieu Of Dividends": "dividend",
+    "Withholding Tax": "withholding_tax", "Broker Interest Paid": "interest",
+    "Broker Interest Received": "interest", "Bond Interest Paid": "interest",
+    "Bond Interest Received": "interest", "Other Fees": "fee",
+    "Deposits/Withdrawals": "capital", "Commission Adjustments": "commission",
+}
+SOF_CODE_CATEGORY = {
+    "BUY": "trade", "SELL": "trade", "ADJ": "futures_mtm", "DINT": "interest", "CINT": "interest",
+    "INT": "interest", "DIV": "dividend", "PIL": "dividend", "FRTAX": "withholding_tax",
+    "WHT": "withholding_tax", "OFEE": "fee", "FEE": "fee", "DEP": "capital", "WITH": "capital",
+    "CA": "corporate_action", "TTAX": "transaction_tax", "SLINC": "securities_lending",
+}
+
+
+def _interest_ccy(row: dict) -> str:
+    """Currency an interest line is about. The ledger's base-currency rows say 'USD' for every
+    line, so read the description ('EUR Debit Interest for Sep-2026') first."""
+    desc = (row.get("description") or row.get("activityDescription") or "").strip()
+    head = desc[:3].upper()
+    if len(desc) > 4 and head.isalpha() and desc[3] == " " and "INT" in desc.upper():
+        return head
+    return row.get("currency", "")
+
+
+def _conid_owners(trades: dict[tuple, dict]) -> dict[str, str]:
+    """conid -> sleeve, from TAGGED trades. A conid traded by two sleeves maps to 'conflict'."""
+    owners: dict[str, str] = {}
+    for t in trades.values():
+        s, c = t.get("strategy"), t.get("conid")
+        if s and c:
+            owners[c] = s if owners.get(c, s) == s else "conflict"
+    return owners
+
+
+def _instrument_sleeve(row: dict, owners: dict[str, str]) -> str:
+    return (owners.get(row.get("conid", ""))
+            or ASSET_SLEEVE.get(row.get("assetCategory", ""), "unassigned"))
+
+
+def attribute(row: dict, category: str, owners: dict[str, str], base: str) -> str:
+    """The sleeve (or 'book' / 'capital' / 'unassigned') a cash event belongs to."""
+    desc = (row.get("description") or row.get("activityDescription") or "").upper()
+    if category == "capital":
+        return "capital"
+    if category == "securities_lending" or any(w in desc for w in SYEP_WORDS):
+        return "magic-formula"
+    if category == "interest":
+        return "book" if _interest_ccy(row) == base else "magic-formula"
+    if category == "fx_translation":
+        return "magic-formula"            # revaluation of the foreign balances its trades create
+    if category == "fee" and not row.get("conid"):
+        return "options-vrp" if any(w in desc for w in MARKET_DATA_WORDS) else "book"
+    if row.get("conid") or row.get("assetCategory"):
+        return _instrument_sleeve(row, owners)
+    return "unassigned"
+
+
+def _category(row: dict, base_category: str) -> str:
+    """Refine a code/type-based category using the description (IB reuses codes: 'ADJ' is both
+    a futures variation-margin line and the FX revaluation of foreign cash)."""
+    desc = (row.get("description") or row.get("activityDescription") or "").upper()
+    if any(w in desc for w in SYEP_WORDS):
+        return "securities_lending"
+    if "FX TRANSLATION" in desc:
+        return "fx_translation"
+    if base_category == "futures_mtm" and row.get("assetCategory") != "FUT":
+        return "adjustment"
+    return base_category
+
+
+def _apply_attribution(rows: dict[str, dict[tuple, dict]]) -> None:
+    """Add `sleeve` and `category` columns to every cash-type table (in place)."""
+    owners = _conid_owners(rows.get("trades", {}))
+    acct = next(iter(rows.get("account_information", {}).values()), {})
+    base = acct.get("currency") or "USD"
+    for t in rows.get("trades", {}).values():
+        t["sleeve"] = t.get("strategy") or _instrument_sleeve(t, owners)
+        t["category"] = "trade"
+    for r in rows.get("cash_transactions", {}).values():
+        r["category"] = _category(r, CASH_TYPE_CATEGORY.get(r.get("type", ""), "other"))
+        r["sleeve"] = attribute(r, r["category"], owners, base)
+    for r in rows.get("statement_of_funds", {}).values():
+        code = r.get("activityCode", "")
+        r["category"] = _category(r, SOF_CODE_CATEGORY.get(code, "other" if code else "balance"))
+        r["sleeve"] = "-" if r["category"] == "balance" else attribute(r, r["category"], owners, base)
+    for name, cat in (("corporate_actions", "corporate_action"), ("option_exercises", "option_event"),
+                      ("transaction_taxes", "transaction_tax"), ("fx_transactions", "fx")):
+        for r in rows.get(name, {}).values():
+            r["category"] = cat
+            r["sleeve"] = (_instrument_sleeve(r, owners) if cat != "fx"
+                           else ("book" if r.get("fxCurrency") == base else "magic-formula"))
+
+
+def _attribution_summary(rows: dict[str, dict[tuple, dict]]) -> list[dict]:
+    """Base-currency cash ledger totals by date x sleeve x category. Uses ONE level of detail
+    (BaseCurrency if present, else Currency) so nothing is counted twice."""
+    sof = [r for r in rows.get("statement_of_funds", {}).values() if r.get("category") != "balance"]
+    levels = {r.get("levelOfDetail") for r in sof}
+    level = "BaseCurrency" if "BaseCurrency" in levels else (next(iter(levels)) if levels else "")
+    agg: dict[tuple, float] = {}
+    for r in sof:
+        if r.get("levelOfDetail") != level:
+            continue
+        amt = float(r.get("amount") or 0) * (1.0 if level == "BaseCurrency"
+                                              else float(r.get("fxRateToBase") or 1))
+        k = (r.get("date") or r.get("reportDate", ""), r["sleeve"], r["category"])
+        agg[k] = agg.get(k, 0.0) + amt
+    return [{"date": d, "sleeve": s, "category": c, "amount_base": round(v, 4)}
+            for (d, s, c), v in sorted(agg.items())]
+
+
+def reconcile_latest() -> list[str]:
+    """Check the LATEST statement against itself: IB's NAV bridge (ChangeInNAV) vs the sum of the
+    individual rows it summarises. A mismatch means rows are missing from what we attribute
+    (a section not ticked, a new IB row type) -- the trail is not complete."""
+    files = sorted((RECORDS / "raw").rglob("*.xml"))
+    if not files:
+        return []
+    warn = []
+    for stmt in ET.parse(files[-1]).getroot().iter("FlexStatement"):
+        nav = stmt.find(".//ChangeInNAV")
+        if nav is None or not nav.attrib:
+            return ["latest statement has no ChangeInNAV — cannot reconcile; is the section ticked?"]
+        fx = lambda e, f: float(e.get(f) or 0) * float(e.get("fxRateToBase") or 1)  # noqa: E731
+        got = {"dividends": 0.0, "withholdingTax": 0.0, "interest": 0.0, "otherFees": 0.0,
+               "depositsWithdrawals": 0.0, "commissions": 0.0, "transactionTax": 0.0}
+        bridge_key = {"dividend": "dividends", "withholding_tax": "withholdingTax",
+                      "interest": "interest", "fee": "otherFees", "capital": "depositsWithdrawals",
+                      "commission": "commissions"}
+        for e in stmt.iter("CashTransaction"):
+            if not e.attrib or e.get("levelOfDetail", "DETAIL") not in ("DETAIL", ""):
+                continue
+            k = bridge_key.get(CASH_TYPE_CATEGORY.get(e.get("type", ""), ""))
+            if k:
+                got[k] += fx(e, "amount")
+        for e in stmt.iter("Trade"):
+            if e.attrib and e.get("levelOfDetail", "EXECUTION") == "EXECUTION":
+                got["commissions"] += fx(e, "ibCommission")
+        for e in stmt.iter("TransactionTax"):
+            if e.attrib:
+                got["transactionTax"] += fx(e, "taxAmount")
+        for k, v in got.items():
+            want = float(nav.get(k) or 0)
+            if abs(want - v) > max(0.05, 0.001 * abs(want)):
+                warn.append(f"NAV bridge mismatch {stmt.get('fromDate')}-{stmt.get('toDate')}: "
+                            f"{k} IB={want:,.2f} vs rows={v:,.2f} — rows missing from the trail?")
+    return warn
+
+
 def rebuild_tables() -> dict[str, int]:
     """Rebuild tables/*.csv from every raw file. Later downloads win on duplicate keys, so a
     corrected record from IB replaces the earlier version of the same id."""
@@ -226,6 +399,10 @@ def rebuild_tables() -> dict[str, int]:
                         a["strategy"], a["run_id"] = _split_ref(a.get("orderReference", ""))
                     a["_period"], a["_source_file"] = period, p.name
                     rows[name][tuple(a.get(k, "") for k in key)] = a
+    _apply_attribution(rows)
+    summary = _attribution_summary(rows)
+    if summary:
+        rows["attribution_summary"] = {(r["date"], r["sleeve"], r["category"]): r for r in summary}
     out_dir = RECORDS / "tables"
     out_dir.mkdir(parents=True, exist_ok=True)
     counts = {}
@@ -266,6 +443,36 @@ def audit_checks(counts: dict[str, int]) -> list[str]:
     for must in ("trades", "cash_transactions", "open_positions"):
         if must not in counts and (RECORDS / "raw").exists():
             warn.append(f"no '{must}' rows in any statement — is that section in the Flex Query?")
+    # Attribution: every cash event must land in a bucket.
+    for name in ("cash_transactions", "statement_of_funds", "corporate_actions",
+                 "option_exercises", "transaction_taxes", "trades"):
+        p = RECORDS / "tables" / f"{name}.csv"
+        if not p.exists():
+            continue
+        with open(p, encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        bad = [r for r in rows if r.get("sleeve") in ("unassigned", "conflict")]
+        if bad:
+            r = bad[0]
+            warn.append(f"{len(bad)} {name} row(s) not attributable to a sleeve (e.g. "
+                        f"{r.get('type') or r.get('activityCode')} {r.get('symbol')} "
+                        f"{r.get('description') or r.get('activityDescription', '')})")
+        # Events that may need a manual correction in a sleeve's own ledger. Reported ONCE each:
+        # an event stays in the rolling 7-day window for a week and must not alert 7 times.
+        if name in ("corporate_actions", "option_exercises"):
+            seen_file = RECORDS / "review_alerted.json"
+            seen = set(json.loads(seen_file.read_text())) if seen_file.exists() else set()
+            for r in rows:
+                key = f"{name}|{r.get('transactionID')}|{r.get('conid')}|{r.get('date') or r.get('reportDate')}"
+                needs = (name == "corporate_actions" or "Assign" in r.get("transactionType", "")
+                         or "Exercise" in r.get("transactionType", ""))
+                if needs and key not in seen:
+                    warn.append(f"REVIEW {name}: {r.get('sleeve')} {r.get('symbol')} "
+                                f"{r.get('transactionType') or r.get('type', '')} "
+                                f"{r.get('description', '')} — check that sleeve's ledger")
+                    seen.add(key)
+            seen_file.write_text(json.dumps(sorted(seen), indent=1))
+    warn += reconcile_latest()
     return warn
 
 

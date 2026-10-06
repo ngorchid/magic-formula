@@ -113,6 +113,33 @@ tables/*.csv                                        derived from ALL raw files e
 - The folder lives outside every checkout so a re-clone can't touch it. **It is not yet backed
   up** — it should be (it is the books of record).
 
+## Attribution of events without an order (owner's rules, 2026-10-06)
+
+Every cash-type row (cash transactions, statement of funds, corporate actions, option
+exercises/expiries, transaction taxes, FX transactions) and every trade gets a `sleeve` and a
+`category` column; `tables/attribution_summary.csv` totals the base-currency cash ledger by
+date × sleeve × category.
+
+| Event | Sleeve |
+|---|---|
+| Dividends, payment in lieu, withholding tax, corporate actions, option exercise/expiry, futures variation margin, transaction taxes | the sleeve holding the instrument — by the orderReference of the tagged trade in that conid, else by asset class (STK/CASH → magic-formula, FUT → trend-overlay, OPT → options-vrp) |
+| SYEP securities-lending income | magic-formula |
+| Interest in a foreign currency; FX translation of foreign cash | magic-formula |
+| Interest in the base currency (USD) | **book** |
+| Market-data subscription fees | **options-vrp** |
+| Other account fees | book |
+| Deposits / withdrawals | capital (not P&L) |
+| Anything else | unassigned → audit alert |
+
+Daily checks (alert email): any unassigned row; IB's NAV bridge (Change in NAV: dividends,
+withholding, interest, fees, commissions, transaction taxes, deposits) must equal the sum of the
+rows it summarises in the latest statement; corporate actions and option assignments/exercises
+are flagged once each (`review_alerted.json`) because they may need a correction in the sleeve's
+own ledger.
+
+The account is enrolled in **SYEP** (IB lends out shares), so also tick *Securities
+Borrowed/Lent*, *Securities Borrowed/Lent Activity* and *Securities Borrowed/Lent Fee Details*.
+
 ## Alerts (email, failure only)
 
 - download failed (with the IB error code; transient ones say so)
