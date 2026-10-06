@@ -128,6 +128,20 @@ class Broker:
         # statements, so every fill is attributable to a strategy AND the run that placed it.
         self.order_ref: str | None = None
 
+    def _exec_ids(self, trade, wait: float = 3.0) -> list[str]:
+        """IB execution ids of a filled order: the key that matches `ibExecID` in the Flex
+        records, so each ledger entry ties to IB's own record exactly (verified 2026-10-06; the
+        permId does NOT match Flex's ibOrderID). execDetails can trail the Filled status by a
+        moment, so wait briefly for them. Never raises -- an id is evidence, not a precondition."""
+        try:
+            waited = 0.0
+            while not getattr(trade, "fills", None) and waited < wait:
+                self.ib.sleep(0.5)
+                waited += 0.5
+            return [f.execution.execId for f in (getattr(trade, "fills", None) or [])]
+        except Exception:  # noqa: BLE001
+            return []
+
     def _tag(self, order):
         # getattr: tests build Broker via __new__ (no __init__), and a missing tag must never
         # stop an order — an exception here would be caught by order() and drop a real trade.
@@ -349,8 +363,11 @@ class Broker:
             st = trade.orderStatus.status
             if st == "Filled":
                 fill = trade.orderStatus.avgFillPrice or None
-                logging.info("%s %d %s -> Filled @ %s", action, shares, ticker, fill)
-                return {"ok": True, "status": st, "fill_price": float(fill) if fill else None}
+                ex = self._exec_ids(trade)
+                logging.info("%s %d %s -> Filled @ %s  exec %s", action, shares, ticker, fill,
+                             ",".join(ex) or "?")
+                return {"ok": True, "status": st, "fill_price": float(fill) if fill else None,
+                        "exec_ids": ex, "order_ref": order.orderRef}
             # NOT filled within the wait. Booking a queued order at the mark is what created
             # phantoms: a market order into a CLOSED market — a US holiday, a European local
             # holiday (every venue has its own), or Oslo after its 16:20 close — sits PreSubmitted,
@@ -367,10 +384,12 @@ class Broker:
                     pass
                 if trade.orderStatus.status == "Filled":
                     fill = trade.orderStatus.avgFillPrice or None
-                    logging.info("%s %d %s -> Filled @ %s (during cancel race)",
-                                 action, shares, ticker, fill)
+                    ex = self._exec_ids(trade)
+                    logging.info("%s %d %s -> Filled @ %s (during cancel race)  exec %s",
+                                 action, shares, ticker, fill, ",".join(ex) or "?")
                     return {"ok": True, "status": "Filled",
-                            "fill_price": float(fill) if fill else None}
+                            "fill_price": float(fill) if fill else None,
+                            "exec_ids": ex, "order_ref": order.orderRef}
                 st = trade.orderStatus.status
             part = int(trade.orderStatus.filled or 0)
             logging.warning("%s %d %s NOT filled (status=%s, filled=%d) — cancelled, not recorded; "
@@ -454,8 +473,11 @@ class Broker:
             if st in self._DEAD:
                 logging.warning("FX %s %d %s NOT live (status=%s)", action, qty, pair, st)
                 return {"ok": False, "status": st, "filled": 0.0}
-            logging.info("FX %s %d %s -> %s", action, qty, pair, st)
-            return {"ok": True, "status": st, "filled": float(amount_ccy)}
+            ex = self._exec_ids(trade) if st == "Filled" else []
+            # FX sweeps are not in the strategy ledger, so the log line is their link to IB.
+            logging.info("FX %s %d %s -> %s  ref %s exec %s", action, qty, pair, st,
+                         order.orderRef or "-", ",".join(ex) or "?")
+            return {"ok": True, "status": st, "filled": float(amount_ccy), "exec_ids": ex}
         except Exception as e:  # noqa: BLE001
             logging.error("FX convert failed %s %s: %s", ccy, amount_ccy, e)
             return {"ok": False, "status": "error", "filled": 0.0}

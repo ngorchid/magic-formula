@@ -28,6 +28,10 @@ class Position:
     entry_fx: float = 1.0       # USD per 1 unit local ccy, at entry
     currency: str = "USD"
     exchange: str = "SMART"
+    # Link to IB's own records: the order's orderRef ("magic-formula:<run id>") and the
+    # execution ids (= Flex `ibExecID`) of the BUY. Empty for positions opened before 2026-10-06.
+    entry_order_ref: str = ""
+    entry_exec_ids: list[str] = field(default_factory=list)
 
     def clock_expiry(self, hold_days: int = HOLD_DAYS) -> str:
         """Date the position's ~1-month clock is up (entry + hold_days business days)."""
@@ -100,7 +104,8 @@ class PortfolioState:
         self.positions.append(pos)
 
     def close_position(self, ticker: str, exit_price: float, exit_fx: float,
-                       exit_date: str, reason: str = "") -> dict | None:
+                       exit_date: str, reason: str = "", order_ref: str = "",
+                       exec_ids: list[str] | None = None) -> dict | None:
         pos = self.get(ticker)
         if pos is None:
             return None
@@ -111,7 +116,10 @@ class PortfolioState:
         rec = {"ticker": ticker, "shares": pos.shares, "currency": pos.currency,
                "entry_price": pos.entry_price, "entry_date": pos.entry_date, "entry_fx": pos.entry_fx,
                "exit_price": exit_price, "exit_fx": exit_fx, "exit_date": exit_date,
-               "pnl_usd": round(pnl, 2), "reason": reason}
+               "pnl_usd": round(pnl, 2), "reason": reason,
+               # both legs' links to IB's records (Flex ibExecID / orderReference)
+               "entry_order_ref": pos.entry_order_ref, "entry_exec_ids": list(pos.entry_exec_ids),
+               "exit_order_ref": order_ref, "exit_exec_ids": list(exec_ids or [])}
         self.trade_log.append(rec)
         self.positions = [p for p in self.positions if p.ticker != ticker]
         return rec
