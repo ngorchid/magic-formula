@@ -123,6 +123,18 @@ class Broker:
         self.gateway_bat, self.dry_run = gateway_bat, dry_run
         self.ib = None
         self._contracts: dict[str, object] = {}
+        # Stamped on every order as IB's orderRef ("<strategy>:<run id>"), set by the runner.
+        # The account is shared by several sleeves; IB carries orderRef into executions and Flex
+        # statements, so every fill is attributable to a strategy AND the run that placed it.
+        self.order_ref: str | None = None
+
+    def _tag(self, order):
+        # getattr: tests build Broker via __new__ (no __init__), and a missing tag must never
+        # stop an order — an exception here would be caught by order() and drop a real trade.
+        ref = getattr(self, "order_ref", None)
+        if ref:
+            order.orderRef = ref
+        return order
 
     # ---- connection ----
     def connect(self, max_retries: int = 3, startup_wait: int = 40) -> bool:
@@ -322,7 +334,7 @@ class Broker:
             logging.warning("cannot order %s — contract unresolved", ticker)
             return {"ok": False, "status": "unresolved", "fill_price": None}
         try:
-            order = MarketOrder(action, shares)
+            order = self._tag(MarketOrder(action, shares))
             order.tif = "DAY"                      # explicit — avoids the preset TIF cancel/resubmit
             trade = self.ib.placeOrder(c, order)
             # Poll up to `wait`s, returning as soon as the order reaches a terminal state. A single
@@ -429,7 +441,7 @@ class Broker:
         try:
             c = Forex(pair)
             self.ib.qualifyContracts(c)
-            order = MarketOrder(action, qty)
+            order = self._tag(MarketOrder(action, qty))
             order.tif = "DAY"
             trade = self.ib.placeOrder(c, order)
             waited = 0.0
