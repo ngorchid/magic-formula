@@ -54,6 +54,16 @@ STATE_FILE = ROOT / "results" / "paper" / "state.json"
 RUN_ID = datetime.now().strftime("%Y%m%d-%H%M%S")
 ORDER_REF = f"magic-formula:{RUN_ID}"
 
+
+def make_broker(**kw) -> Broker:
+    """The run's broker, tagged with this run's ORDER_REF. A factory rather than two inline lines
+    so the tagging is testable: scripts/test_order_links.py asserts main() builds its broker here
+    and that the tag is set, because a runner that forgets it sends every order out untagged
+    while the broker-level tests stay green."""
+    b = Broker(**kw)
+    b.order_ref = ORDER_REF
+    return b
+
 # Annualised vol prior for the circuit-breaker levels: 19.0%, from the AUTHORITATIVE backtest —
 # scripts/run_best_magic.py on the PIT survivorship-corrected S&P 500 with EDGAR deep-history
 # fundamentals, 2012-01..2026-07 (14.6 yrs): ann +17.7%, vol 19.0%, Sharpe 0.96, maxDD -35.8%.
@@ -345,11 +355,10 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     elif _bscale < 1.0:                   # derisk: smaller new positions
         cfg.vol_target *= _bscale
 
-    broker = Broker(host=os.getenv("IB_HOST", "127.0.0.1"),
-                    port=int(os.getenv("IB_PORT", "7497")),
-                    client_id=int(os.getenv("IB_CLIENT_ID", "5")),
-                    dry_run=dry_run)
-    broker.order_ref = ORDER_REF
+    broker = make_broker(host=os.getenv("IB_HOST", "127.0.0.1"),
+                         port=int(os.getenv("IB_PORT", "7497")),
+                         client_id=int(os.getenv("IB_CLIENT_ID", "5")),
+                         dry_run=dry_run)
     logging.info("run id %s — orders tagged orderRef=%s", RUN_ID, ORDER_REF)
     if not dry_run:
         if not broker.connect():

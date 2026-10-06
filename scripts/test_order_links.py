@@ -115,6 +115,124 @@ old = Position(**{"ticker": "INCY", "shares": 15, "entry_price": 122.0, "entry_d
 check("a position saved before these fields existed still loads",
       old.entry_order_ref == "" and old.entry_exec_ids == [], str(old))
 
+
+print("\nCANCEL RACE")
+
+
+class RaceIB(FakeIB):
+    """Order sits 'Submitted' through the poll and fills just as the cancel lands."""
+
+    def placeOrder(self, contract, order):
+        self.n += 1
+        self.sent.append(order)
+        self._race = NS(order=order, fills=[],
+                        orderStatus=NS(status="Submitted", avgFillPrice=0.0, filled=0))
+        return self._race
+
+    def sleep(self, s):
+        pass
+
+    def cancelOrder(self, o):
+        self._race.orderStatus = NS(status="Filled", avgFillPrice=10.0, filled=o.totalQuantity)
+        self._race.fills = [NS(execution=NS(execId=f"0009.{self.n}.01"))]
+
+
+race = broker(RaceIB()).order("NVDA", "BUY", 2, wait=2)
+check("a fill that lands during the cancel race keeps its execution ids",
+      race.get("status") == "Filled" and race.get("exec_ids") == ["0009.1.01"], str(race))
+check("...and its orderRef", race.get("order_ref") == "magic-formula:20261006-160002", str(race))
+
+# ---------------------------------------------------------------------------------------------
+# RUNNER WIRING. Everything above hands the broker its tag by hand, so it cannot see the runner
+# forgetting to: deleting that one line in run_paper.py sent every order out untagged while all
+# of the above stayed green. These pin the runner's own wiring.
+print("\nRUNNER WIRING")
+import inspect  # noqa: E402
+import re  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "scripts"))
+import run_paper  # noqa: E402
+
+check("ORDER_REF is 'magic-formula:<YYYYmmdd-HHMMSS>'",
+      re.fullmatch(r"magic-formula:\d{8}-\d{6}", run_paper.ORDER_REF) is not None,
+      run_paper.ORDER_REF)
+mb = run_paper.make_broker(dry_run=True)
+check("make_broker tags the broker with this run's ORDER_REF",
+      mb.order_ref == run_paper.ORDER_REF, repr(mb.order_ref))
+_src = inspect.getsource(run_paper.main)
+check("main() builds its broker through make_broker, never Broker() directly",
+      "make_broker(" in _src and "Broker(" not in _src, "")
+
+# ---------------------------------------------------------------------------------------------
+# ORCHESTRATOR -> LEDGER. The ledger checks above call open_position / close_position directly
+# with the values the broker returned, so they cannot see run_daily dropping them on the way.
+# This drives the REAL run_daily: one clock-expired name is sold, new names are bought.
+# top_n must be large enough that one order clears the 15% single-order cap (top_n=3 makes every
+# order 33% of budget, the guard rejects them all and the BUY cases could not fail).
+print("\nORCHESTRATOR -> LEDGER")
+import tempfile  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+
+from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
+
+
+class LinkBroker:
+    """Collaborator stub: fills every order and returns ids the way the real Broker does.
+    dry_run=True only keeps run_daily off the margin/FX-sweep IB calls; the fills are 'Filled'."""
+
+    dry_run = True
+
+    def __init__(self):
+        self.n = 0
+
+    def order(self, ticker, action, shares, wait=20.0):
+        self.n += 1
+        return {"ok": True, "status": "Filled", "fill_price": 100.0,
+                "exec_ids": [f"E{self.n}.{ticker}"], "order_ref": f"magic-formula:RUN-{action}"}
+
+
+_today = "2026-08-17"
+_idx = pd.bdate_range(end=pd.Timestamp(_today), periods=400)
+_rng = np.random.default_rng(7)
+_names = [f"N{i}" for i in range(14)] + ["OLD"]       # OLD sits outside the hold band
+_px = pd.DataFrame({n: 100 * np.exp(np.cumsum(_rng.standard_normal(len(_idx)) * 0.01))
+                    for n in _names}, index=_idx)
+_rank = pd.Series(range(len(_names)), index=_names, dtype=float)       # OLD ranks last
+_st = PortfolioState(cash=100_000.0, positions=[
+    Position("OLD", 10, 100.0, "2026-07-01", entry_order_ref="magic-formula:OLD-RUN",
+             entry_exec_ids=["X1"])])
+run_daily(_st, _rank, {"adj": _px, "currency": {c: "USD" for c in _names}}, {"USD": 1.0},
+          LinkBroker(), PaperConfig(max_new_buys_per_day=2, hold_n=12, top_n=10, budget=100_000.0),
+          _today)
+_new = [p for p in _st.positions if p.ticker != "OLD"]
+_sold = [r for r in _st.trade_log if r.get("ticker") == "OLD"]
+check("run_daily bought at least one name (the fixture can fail)", len(_new) > 0,
+      str([p.ticker for p in _st.positions]))
+check("a BUY placed by run_daily stores its orderRef on the position",
+      bool(_new) and all(p.entry_order_ref == "magic-formula:RUN-BUY" for p in _new),
+      str([(p.ticker, p.entry_order_ref) for p in _new]))
+check("...and its execution ids",
+      bool(_new) and all(len(p.entry_exec_ids) == 1 and p.entry_exec_ids[0].endswith(f".{p.ticker}")
+                         for p in _new),
+      str([(p.ticker, p.entry_exec_ids) for p in _new]))
+check("a SELL placed by run_daily stores the EXIT tag and execution ids",
+      len(_sold) == 1 and _sold[0]["exit_order_ref"] == "magic-formula:RUN-SELL"
+      and len(_sold[0]["exit_exec_ids"]) == 1 and _sold[0]["exit_exec_ids"][0].endswith(".OLD"),
+      str(_sold))
+check("...and keeps the ENTRY tag and execution ids of the position it closed",
+      len(_sold) == 1 and _sold[0]["entry_order_ref"] == "magic-formula:OLD-RUN"
+      and _sold[0]["entry_exec_ids"] == ["X1"], str(_sold))
+
+with tempfile.TemporaryDirectory() as _tmp:
+    _f = Path(_tmp) / "state.json"
+    _st.save(_f)
+    _back = PortfolioState.load(_f)
+check("save -> load keeps each position's orderRef and execution ids",
+      [(p.entry_order_ref, p.entry_exec_ids) for p in _back.positions]
+      == [(p.entry_order_ref, p.entry_exec_ids) for p in _st.positions] and bool(_new), "")
+
 print("\n" + "=" * 88)
 if _fails:
     print(f"{len(_fails)} FAILURE(S) of {_ran}:")
