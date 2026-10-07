@@ -237,6 +237,102 @@ check("a missing id with the legs' prefix but a LEG sequence (.04) is reported",
 check("a missing id of another shape is reported", spread_case("combo-1") != {},
       str(table("exec_reconciliation")))
 
+check("a second execution of the combo id (.01.02) is reported, not taken for the combo id",
+      spread_case("0002cc.k.01.02") != {}, str(table("exec_reconciliation")))
+
+print("\nCOMBO RULE — a missing LEG id always alerts; extra executions never pass silently")
+
+
+def legs_case(flex_legs: list[tuple], ledger_ids: list[str]) -> list[dict]:
+    """IWM 263/256 x2. flex_legs: (exec id, side, qty, price, strike) actually in Flex."""
+    fresh()
+    put("20261006", "20261008", "".join(opt(e, V, sd, q, px, k) for e, sd, q, px, k in flex_legs),
+        "2026-10-08T08:30:00")
+    empty_ledgers()
+    ledger("options-vrp", {"trade_log": [
+        {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
+         "credit": 0.74, "order_ref": V, "exec_ids": ledger_ids}]})
+    run()
+    return table("exec_reconciliation")
+
+
+ALL3 = ["0002cc.k.01.01", "0002cc.k.02.01", "0002cc.k.03.01"]
+SHORT, LONG = ("0002cc.k.02.01", "SELL", 2, 1.20, 263), ("0002cc.k.03.01", "BUY", 2, 0.46, 256)
+t = legs_case([LONG], ALL3)
+check("short leg .02.01 missing from Flex -> ledger_not_in_flex naming .02.01",
+      any(r["class"] == "ledger_not_in_flex" and "0002cc.k.02.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case([SHORT], ALL3)
+check("long leg .03.01 missing from Flex -> ledger_not_in_flex naming .03.01",
+      any(r["class"] == "ledger_not_in_flex" and "0002cc.k.03.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case([SHORT, LONG], ["0002cc.k.02.01", "0002cc.k.03.01"])
+check("...and the same spread with both legs present (no combo id in the ledger) matches",
+      [r["class"] for r in t] == ["matched"], str(t))
+PART = [("0002cc.k.02.01", "SELL", 1, 1.19, 263), ("0002cc.k.02.02", "SELL", 1, 1.21, 263), LONG]
+t = legs_case(PART, ["0002cc.k.01.01", "0002cc.k.02.01", "0002cc.k.02.02", "0002cc.k.03.01"])
+check("a leg filled in TWO executions (.02.01 + .02.02): the combo id is NOT accepted, the alert "
+      "says why", any(r["class"] == "ledger_not_in_flex" and "0002cc.k.01.01" in r["exec_ids"]
+                      and "3 executions for 2 legs" in r["detail"] for r in t), str(t))
+t = legs_case([("02.01", "SELL", 2, 1.20, 263), ("03.01", "BUY", 2, 0.46, 256)],
+              ["01.01", "02.01", "03.01"])
+check("ids WITHOUT a prefix (01.01 next to legs 02.01 / 03.01) are not the verified shape -> reported",
+      any(r["class"] == "ledger_not_in_flex" and r["exec_ids"] == "01.01" for r in t), str(t))
+t = legs_case([("0002cc.k.02.02", "SELL", 2, 1.20, 263), LONG],
+              ["0002cc.k.01.01", "0002cc.k.02.02", "0002cc.k.03.01"])
+check("a leg whose only execution is a SECOND one (.02.02): the .01.01 id is not accepted",
+      any(r["class"] == "ledger_not_in_flex" and "0002cc.k.01.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case(PART, ["0002cc.k.02.01", "0002cc.k.02.02", "0002cc.k.03.01"])
+check("...without a combo id in the ledger the split leg is compared on its summed quantity and "
+      "VWAP -> matched", [r["class"] for r in t] == ["matched"], str(t))
+t = legs_case(PART, ["0002cc.k.01.01", "0002cc.k.02.01", "0002cc.k.03.01"])
+check("an execution IB made that the ledger did not book (.02.02) -> flex_tagged_unbooked, "
+      "never silently absorbed",
+      any(r["class"] == "flex_tagged_unbooked" and "0002cc.k.02.02" in r["exec_ids"] for r in t), str(t))
+
+print("\nCLOSED IN TWO PIECES — two orders, two ledger rows, each matched once")
+fresh()
+put("20261006", "20261009",
+    opt("0002aa.e4.02.01", V, "SELL", 2, 1.20, 263) + opt("0002aa.e4.03.01", V, "BUY", 2, 0.46, 256)
+    + opt("0003a1.c1.02.01", V, "BUY", 1, 0.60, 263, date="20261008")
+    + opt("0003a1.c1.03.01", V, "SELL", 1, 0.20, 256, date="20261008")
+    + opt("0003a2.c2.02.01", V, "BUY", 1, 0.50, 263, date="20261009")
+    + opt("0003a2.c2.03.01", V, "SELL", 1, 0.15, 256, date="20261009"), "2026-10-10T08:30:00")
+empty_ledgers()
+ledger("options-vrp", {"trade_log": [
+    {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
+     "credit": 0.74, "order_ref": V, "exec_ids": ["0002aa.e4.01.01", "0002aa.e4.02.01", "0002aa.e4.03.01"]},
+    {"date": "2026-10-08", "action": "CLOSE", "key": "IWM_2026-11-20_263_256", "contracts": 1,
+     "close_value": 0.40, "order_ref": V, "exec_ids": ["0003a1.c1.01.01", "0003a1.c1.02.01", "0003a1.c1.03.01"]},
+    {"date": "2026-10-09", "action": "CLOSE", "key": "IWM_2026-11-20_263_256", "contracts": 1,
+     "close_value": 0.35, "order_ref": V, "exec_ids": ["0003a2.c2.01.01", "0003a2.c2.02.01", "0003a2.c2.03.01"]}]})
+warn, counts = run()
+t = table("exec_reconciliation")
+check("open + two partial closes: three rows, all matched, no warning",
+      counts == {"matched": 3} and warn == [], f"{counts} {warn} {t}")
+
+print("\nNO DOUBLE COUNTING — overlapping downloads and ORDER-level rows")
+fresh()
+legs = opt("0002be7d.6ac5508e.02.01", V, "SELL", 2, 2.10, 263) \
+    + opt("0002be7d.6ac5508e.03.01", V, "BUY", 2, 1.36, 256)
+order_rows = legs.replace('levelOfDetail="EXECUTION"', 'levelOfDetail="ORDER"') \
+    .replace('ibExecID="0002be7d.6ac5508e.02.01"', 'ibExecID=""') \
+    .replace('ibExecID="0002be7d.6ac5508e.03.01"', 'ibExecID=""')
+for frm, to, when in (("20261001", "20261007", "2026-10-08T08:30:00"),
+                      ("20261002", "20261008", "2026-10-09T08:30:00"),
+                      ("20261003", "20261009", "2026-10-10T08:30:00")):
+    put(frm, to, legs + order_rows, when)            # the same fill in three rolling windows
+empty_ledgers()
+ledger("options-vrp", {"trade_log": [
+    {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
+     "credit": 0.74, "order_ref": V,
+     "exec_ids": ["0002be7d.6ac5508e.01.01", "0002be7d.6ac5508e.02.01", "0002be7d.6ac5508e.03.01"]}]})
+warn, counts = run()
+ex = [r for r in table("trades") if r.get("levelOfDetail") == "EXECUTION"]
+check("three overlapping downloads keep each execution ONCE in the rebuilt trades table",
+      sorted(r["ibExecID"] for r in ex) == ["0002be7d.6ac5508e.02.01", "0002be7d.6ac5508e.03.01"],
+      str([r["ibExecID"] for r in ex]))
+check("ORDER-level rows (same order, no exec id) never enter the check; the spread matches once",
+      counts == {"matched": 1} and warn == [], f"{counts} {warn}")
+
 print("\nREGRESSION — the first three live spreads (2026-10-06), real ids")
 fresh()
 real = [("IWM", "261120", "263", "256", 2, 2.10, 1.36, "0002be7d.6ac5508e"),

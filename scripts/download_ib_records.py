@@ -790,16 +790,17 @@ def _ledger_fills() -> tuple[list[dict], list[str]]:
 
 
 def _is_combo_level_id(missing: str, leg_ids: list[str]) -> bool:
-    """True if `missing` is the combo-level execution id of these legs: same prefix, sequence 01,
-    while every leg is a later sequence (verified 2026-10-07: combo 0002be7d.6ac5508e.01.01, legs
-    .02.01 / .03.01). Anything else -- another prefix, a leg sequence, an odd shape -- is a real
-    missing id."""
+    """True if `missing` is the combo-level execution id of these legs: exactly <prefix>.01.01
+    while every leg is <prefix>.<seq>.01 with seq >= 02 (verified 2026-10-07: combo
+    0002be7d.6ac5508e.01.01, legs .02.01 / .03.01). Anything else -- another prefix, a leg
+    sequence (.02.01 / .03.01 missing), a second execution (.01.02, .02.02), an odd shape -- is a
+    real missing id. Tightened 2026-10-07 to the full .01.01 shape (owner's request)."""
     m = missing.split(".")
-    if len(m) < 3 or m[-2] != "01" or not leg_ids:
+    if len(m) < 3 or m[-2:] != ["01", "01"] or not leg_ids:
         return False
     for leg in leg_ids:
         p = leg.split(".")
-        if len(p) != len(m) or p[:-2] != m[:-2] or p[-2] == "01":
+        if len(p) != len(m) or p[:-2] != m[:-2] or p[-2] == "01" or p[-1] != "01":
             return False
     return True
 
@@ -953,8 +954,13 @@ def reconcile_executions() -> tuple[list[str], dict[str, int]]:
                     emit("not_yet_covered", fl["sleeve"], fl["date"], fl["ref"], fl["exec_ids"])
                 continue
             if absent and covered(fl["date"]):
+                extra = (fl["kind"] == "OPT" and len(found) > len(fl["legs"])
+                         and legs_found == {leg["key"] for leg in fl["legs"]})
                 emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], absent,
-                     "part of this fill's ids are missing from Flex")
+                     (f"combo-level id NOT accepted: {len(found)} executions for "
+                      f"{len(fl['legs'])} legs (partial fills?) — the rule is verified only for "
+                      f"one execution per leg; check the fill in IB and calibrate"
+                      if extra else "part of this fill's ids are missing from Flex"))
                 continue
             diffs = _compare(fl, found)
             if diffs:

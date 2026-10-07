@@ -197,9 +197,21 @@ Notes:
   with the tag and its commission) and never the API's combo-level execution id. That id shares the
   legs' prefix and is sequence `.01`, the legs following as `.02`, `.03` (combo
   `0002be7d.6ac5508e.01.01`, legs `.02.01` / `.03.01`). So ONE missing id on a spread whose legs
-  all matched is accepted only if it is exactly that `.01` sibling; anything else is reported. A
-  combo that partially fills into several executions has not been seen yet — it would show as
-  `ledger_not_in_flex` and be calibrated then.
+  all matched is accepted only if it is exactly `<prefix>.01.01` and every matched leg is
+  `<prefix>.<02, 03, ...>.01` (tightened 2026-10-07: a second execution such as `.01.02` or
+  `.02.02` no longer qualifies). A missing `.02.01` or `.03.01` always alerts. A spread with extra
+  executions (a leg filled in pieces) is NOT given the combo-id allowance: it alerts as
+  `ledger_not_in_flex` with the detail "combo-level id NOT accepted: N executions for M legs", to
+  be checked in IB and calibrated when first seen. Without a combo id in the ledger, split legs are
+  compared on summed quantity and VWAP. A spread closed in two orders is two ledger rows, each
+  matched once.
+- **No double counting.** Each rolling download repeats up to 7 days of executions; the rebuild
+  keys trades on IB's own `(tradeID, transactionID, ibExecID)`, later files replacing earlier ones,
+  so every execution is in `tables/trades.csv` once. The check reads only `EXECUTION`-level, non-BAG
+  rows (ORDER-level rows, which repeat each leg, never enter it), indexes them by `ibExecID`, and
+  marks every id it consumes so no execution can satisfy two ledger rows.
+  `export_vrp_fills.py` lists BOTH levels on purpose (one `Order` and one `Trade` row per leg), so
+  each leg appears twice in its CSV; that is not a double count.
 - **Backfill.** For a VRP tag-only row the real leg ids are written to `tables/exec_backfill.csv`;
   options-vrp applies them to its own ledger at the start of its next run, keeping the superseded
   state on the row. This job never writes a ledger.
