@@ -101,6 +101,41 @@ check("the overlap line is in the email", "Names held by both sleeves: AAPL" in 
 check("a sleeve percentage names its disclosed base",
       "of $50,000)" in body, re.findall(r"\([-0-9.]+% of \$[0-9,]+\)", body))
 
+print("\nOPEN ASSIGNMENTS — a second channel, every day")
+import numpy as np  # noqa: E402
+TODAY = "2026-10-07"
+d = lambda n: str(np.busday_offset(np.datetime64(TODAY), -n, roll="backward"))  # noqa: E731
+asg = tmp / "asg.json"
+asg.write_text(json.dumps({"open_spreads": [
+    {"ticker": "XLE", "short_strike": 90, "long_strike": 85, "contracts": 3, "assigned_contracts": 3,
+     "assigned_date": TODAY, "assigned_auto": True},
+    {"ticker": "NKE", "short_strike": 70, "long_strike": 67.5, "contracts": 2, "assigned_contracts": 2,
+     "assigned_date": d(1), "assigned_auto": False},
+    {"ticker": "BAC", "short_strike": 40, "long_strike": 37.5, "contracts": 6, "assigned_contracts": 6,
+     "assigned_date": d(4), "assigned_auto": True, "assigned_stock_sold": True},
+    {"ticker": "IWM", "short_strike": 263, "long_strike": 256, "contracts": 2}]}))
+lines = safe(bs.open_assignments, asg, TODAY)
+ok = isinstance(lines, list) and len(lines) == 3
+check("one line per assigned spread, none for an intact one", ok and not any("IWM" in x for x in lines), str(lines))
+check("escalates with age: OPEN day 1, ESCALATION day 2, URGENT day 5",
+      ok and lines[0].startswith("OPEN day 1") and lines[1].startswith("ESCALATION day 2")
+      and lines[2].startswith("URGENT day 5"), str(lines))
+check("says what is still on and whether it is automatic or MANUAL",
+      ok and "300 XLE shares + 3 long 85P open; automatic unwind retrying" in lines[0]
+      and "MANUAL unwind needed" in lines[1] and "shares sold, long puts still open" in lines[2], str(lines))
+check("an unreadable ledger says UNKNOWN (never 'nothing open')",
+      "UNKNOWN" in str(safe(bs.open_assignments, bad, TODAY)), "")
+check("no ledger file -> nothing", safe(bs.open_assignments, tmp / "none-here.json", TODAY) == [], "")
+bs.OPTIONS_STATE = asg
+_b2 = safe(bs.build)
+check("the email shows the block AND marks the subject '⚠ ASSIGNED'",
+      isinstance(_b2, tuple) and _b2[0].startswith("⚠ ASSIGNED ") and "OPEN ASSIGNMENTS (options-vrp)" in _b2[1],
+      str(_b2)[:200])
+bs.OPTIONS_STATE = empty                 # an IWM spread, not assigned
+_b3 = safe(bs.build)
+check("no open assignment -> no marker, no block",
+      isinstance(_b3, tuple) and not _b3[0].startswith("⚠") and "OPEN ASSIGNMENTS" not in _b3[1], str(_b3)[:120])
+
 print("\n" + "=" * 88)
 if _fails:
     print(f"{len(_fails)} FAILURE(S) of {_ran}:")

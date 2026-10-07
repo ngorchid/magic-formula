@@ -1,4 +1,4 @@
-"""Mutation-test `scripts/test_book_overlap.py`: the book summary's overlap, TWR and %-of-base lines.
+"""Mutation-test `scripts/test_book_overlap.py`: the book summary's overlap, TWR, %-of-base and open-assignment lines.
 
 Seeds real faults into a TEMP COPY of the repo (the real files are never edited) and demands the
 suite catches every one. Engine: _mutate_repo_core.py.
@@ -48,6 +48,30 @@ MUTATIONS = [
      '               f"{overlap_line(MAGIC_STATE, OPTIONS_STATE)}</p>")',
      '               f"</p>")',
      'the overlap line is missing from the email'),
+    ('scripts/book_summary.py',
+     '        sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")',
+     '        sev = "OPEN"',
+     'open assignments never escalate'),
+    ('scripts/book_summary.py',
+     '        how = "automatic unwind retrying" if sp.get("assigned_auto") else "MANUAL unwind needed"',
+     '        how = "automatic unwind retrying"',
+     'a manual assignment is reported as automatic'),
+    ('scripts/book_summary.py',
+     '        return ["options-vrp ledger unreadable — open assignments UNKNOWN"]',
+     '        return []',
+     "an unreadable ledger reads as 'nothing open'"),
+    ('scripts/book_summary.py',
+     '    subject = (("⚠ ASSIGNED " if _asg else "") + f"Live Book',
+     '    subject = (f"Live Book',
+     'no subject marker for an open assignment'),
+    ('scripts/book_summary.py',
+     '    pv_line = asg_block + (f"',
+     '    pv_line = (f"',
+     'the open-assignment block is not in the email'),
+    ('scripts/book_summary.py',
+     '        if not n:\n            continue\n        since',
+     '        since',
+     'intact spreads listed as assigned'),
 ]
 
 if __name__ == "__main__":

@@ -202,6 +202,37 @@ def ibkr_twr() -> tuple[float, str, str] | None:
         return None
 
 
+def open_assignments(options_path, today: str) -> list[str]:
+    """One line per options-vrp spread recorded as ASSIGNED and not yet unwound, read straight from
+    its ledger, with its age in business days (OPEN day 1, ESCALATION day 2, URGENT day 3+).
+
+    A second channel (2026-10-07): the sleeve's own alert reaches you only if its run sends an
+    email; this line is in the book summary every day whatever the sleeve's run did. An unreadable
+    ledger says so rather than claiming there is nothing open."""
+    p = Path(options_path)
+    if not p.exists():
+        return []
+    try:
+        st = json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return ["options-vrp ledger unreadable — open assignments UNKNOWN"]
+    import numpy as np
+    out = []
+    for sp in st.get("open_spreads", []):
+        n = int(sp.get("assigned_contracts") or 0)
+        if not n:
+            continue
+        since = sp.get("assigned_date") or today
+        days = int(np.busday_count(since, today)) + 1 if since <= today else 1
+        sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")
+        what = ("shares sold, long puts still open" if sp.get("assigned_stock_sold")
+                else f"{100 * n:g} {sp.get('ticker')} shares + {n} long {sp.get('long_strike', 0):g}P open")
+        how = "automatic unwind retrying" if sp.get("assigned_auto") else "MANUAL unwind needed"
+        out.append(f"{sev} day {days}: {sp.get('ticker')} {sp.get('short_strike', 0):g}/"
+                   f"{sp.get('long_strike', 0):g}P x{n} assigned {since} — {what}; {how}")
+    return out
+
+
 def overlap_line(magic_path, options_path) -> str:
     """Names held by BOTH magic-formula (stock) and options-vrp (a spread or delivered stock) --
     the owner's choice (2026-10-07) is to allow the overlap and watch it, not block it."""
@@ -385,7 +416,11 @@ def build() -> tuple[str, str]:
     _twr = ibkr_twr()
     twr_str = (f"{_twr[0]:+.2f}% ({_twr[1]}–{_twr[2]}, IBKR)" if _twr
                else "unavailable (no Flex ChangeInNAV TWR in the archive)")
-    pv_line = (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
+    _asg = open_assignments(OPTIONS_STATE, today)
+    asg_block = ("<div style='border:2px solid #b00;padding:8px;margin:8px 0'>"
+                 "<b style='color:#b00'>OPEN ASSIGNMENTS (options-vrp) — stock delivered by an "
+                 "assigned put is still on</b><br>" + "<br>".join(_asg) + "</div>") if _asg else ""
+    pv_line = asg_block + (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
                f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b><br>"
                f"<b>Account TWR:</b> {twr_str}</p>"
                f"<p style='color:#64748b;font-size:11px;margin:4px 0'>Sleeves are shown in dollars; "
@@ -408,7 +443,7 @@ def build() -> tuple[str, str]:
     </body></html>"""
 
     bdaily = book_row["daily"]
-    subject = (f"Live Book — {today}: value {pv_str}, day {_money(bdaily)}, "
+    subject = (("⚠ ASSIGNED " if _asg else "") + f"Live Book — {today}: value {pv_str}, day {_money(bdaily)}, "
                f"total {_money(book_row['total'])}")
     return subject, body
 

@@ -30,7 +30,7 @@ from paper.broker import Broker, ib_contract_spec  # noqa: E402
 from paper.email_report import send_report  # noqa: E402
 from paper.live_data import _fx_to_usd, fetch_live_panels  # noqa: E402
 from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
-from risk_guard import (code_version, install_alert_collector,  # noqa: E402
+from risk_guard import (code_version, install_alert_collector, email_if_alerts,  # noqa: E402
                         missed_runs,
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_HARD, HALT_NEW, circuit_breaker, peak_equity,
@@ -305,6 +305,7 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # magic-formula has no SAFETY-flagged closes, so HALT_ALL and HALT_HARD both stop it entirely.
     if _halt in (HALT_ALL, HALT_HARD):
         logging.error("HALTED (%s): %s — exiting without trading", _halt, _hwhy)
+        email_if_alerts(ALERTS, f"Magic Formula {_halt.upper()}", today)
         push_if_alerts(ALERTS, "Magic Formula")
         return
     if _halt == HALT_NEW:
@@ -381,6 +382,7 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     if not dry_run:
         if not broker.connect():
             logging.error("Could not connect to IB — aborting run.")
+            email_if_alerts(ALERTS, "Magic Formula", today)
             return
     try:
         summary = run_daily(state, ranking, panels, fx, broker, cfg, today)
