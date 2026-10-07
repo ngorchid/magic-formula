@@ -414,7 +414,8 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 px = res["fill_price"] or marks.get(pos.ticker, pos.entry_price)
                 state.close_position(pos.ticker, px, f, today, reason="clock: dropped from band",
                                      order_ref=res.get("order_ref", ""),
-                                     exec_ids=res.get("exec_ids"))
+                                     exec_ids=res.get("exec_ids"),
+                                     commission=res.get("commission"))
                 sells.append(pos.ticker)
 
     # ---- margin ceiling (shared account) -------------------------------------------------
@@ -497,7 +498,9 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                     ticker=t, shares=shares, entry_price=entry, entry_date=today,
                     entry_fx=f, currency=ccy.get(t, "USD"),
                     entry_order_ref=res.get("order_ref", ""),
-                    entry_exec_ids=list(res.get("exec_ids") or [])))
+                    entry_exec_ids=list(res.get("exec_ids") or []),
+                    entry_conid=int(res.get("conid") or 0),
+                    entry_commission=res.get("commission")))
                 buys.append((t, shares, round(shares * entry * f, 0)))
                 held.add(t)
                 n_buys -= 1

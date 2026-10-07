@@ -142,6 +142,31 @@ class Broker:
         except Exception:  # noqa: BLE001
             return []
 
+    def _commission(self, trade, wait: float = 3.0) -> float | None:
+        """Total IB commission of a filled order, from the commission reports that follow the
+        executions (2026-10-07). A report counts only once IB has sent it (its execId is set).
+        None when they have not all arrived -- a missing value is recorded as missing and never
+        holds up or blocks the trade."""
+        try:
+            waited = 0.0
+            while True:
+                fills = list(getattr(trade, "fills", None) or [])
+                reps = [getattr(f, "commissionReport", None) for f in fills]
+                if fills and all(r is not None and getattr(r, "execId", "") for r in reps):
+                    return round(sum(float(r.commission) for r in reps), 4)
+                if waited >= wait:
+                    return None
+                self.ib.sleep(0.5)
+                waited += 0.5
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _links(self, contract, trade) -> dict:
+        """conid / commission / currency of a fill (additive ledger fields, 2026-10-07)."""
+        return {"conid": int(getattr(contract, "conId", 0) or 0),
+                "commission": self._commission(trade),
+                "currency": getattr(contract, "currency", "") or ""}
+
     def _tag(self, order):
         # getattr: tests build Broker via __new__ (no __init__), and a missing tag must never
         # stop an order — an exception here would be caught by order() and drop a real trade.
@@ -367,7 +392,8 @@ class Broker:
                 logging.info("%s %d %s -> Filled @ %s  exec %s", action, shares, ticker, fill,
                              ",".join(ex) or "?")
                 return {"ok": True, "status": st, "fill_price": float(fill) if fill else None,
-                        "exec_ids": ex, "order_ref": order.orderRef}
+                        "exec_ids": ex, "order_ref": order.orderRef,
+                        **self._links(c, trade)}
             # NOT filled within the wait. Booking a queued order at the mark is what created
             # phantoms: a market order into a CLOSED market — a US holiday, a European local
             # holiday (every venue has its own), or Oslo after its 16:20 close — sits PreSubmitted,
@@ -389,7 +415,8 @@ class Broker:
                                  action, shares, ticker, fill, ",".join(ex) or "?")
                     return {"ok": True, "status": "Filled",
                             "fill_price": float(fill) if fill else None,
-                            "exec_ids": ex, "order_ref": order.orderRef}
+                            "exec_ids": ex, "order_ref": order.orderRef,
+                            **self._links(c, trade)}
                 st = trade.orderStatus.status
             part = int(trade.orderStatus.filled or 0)
             logging.warning("%s %d %s NOT filled (status=%s, filled=%d) — cancelled, not recorded; "

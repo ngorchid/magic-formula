@@ -32,6 +32,9 @@ class Position:
     # execution ids (= Flex `ibExecID`) of the BUY. Empty for positions opened before 2026-10-06.
     entry_order_ref: str = ""
     entry_exec_ids: list[str] = field(default_factory=list)
+    # IB contract id and the BUY's commission (2026-10-07; 0 / None on older positions).
+    entry_conid: int = 0
+    entry_commission: float | None = None
 
     def clock_expiry(self, hold_days: int = HOLD_DAYS) -> str:
         """Date the position's ~1-month clock is up (entry + hold_days business days)."""
@@ -105,7 +108,8 @@ class PortfolioState:
 
     def close_position(self, ticker: str, exit_price: float, exit_fx: float,
                        exit_date: str, reason: str = "", order_ref: str = "",
-                       exec_ids: list[str] | None = None) -> dict | None:
+                       exec_ids: list[str] | None = None,
+                       commission: float | None = None) -> dict | None:
         pos = self.get(ticker)
         if pos is None:
             return None
@@ -119,7 +123,9 @@ class PortfolioState:
                "pnl_usd": round(pnl, 2), "reason": reason,
                # both legs' links to IB's records (Flex ibExecID / orderReference)
                "entry_order_ref": pos.entry_order_ref, "entry_exec_ids": list(pos.entry_exec_ids),
-               "exit_order_ref": order_ref, "exit_exec_ids": list(exec_ids or [])}
+               "exit_order_ref": order_ref, "exit_exec_ids": list(exec_ids or []),
+               "conid": pos.entry_conid, "entry_commission": pos.entry_commission,
+               "exit_commission": commission}
         self.trade_log.append(rec)
         self.positions = [p for p in self.positions if p.ticker != ticker]
         return rec

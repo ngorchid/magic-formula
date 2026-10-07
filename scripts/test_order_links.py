@@ -35,10 +35,11 @@ def check(label: str, cond: bool, detail: str = "") -> None:
 
 
 class FakeIB:
-    """Fills every order at once; `fills_after` sleeps before the execDetails arrive."""
+    """Fills every order at once; `fills_after` sleeps before the execDetails arrive;
+    reports=False: IB never sends the commission reports."""
 
-    def __init__(self, fills_after: int = 0):
-        self.sent, self.n, self.fills_after = [], 0, fills_after
+    def __init__(self, fills_after: int = 0, reports: bool = True):
+        self.sent, self.n, self.fills_after, self.reports = [], 0, fills_after, reports
 
     def qualifyContracts(self, *cs):
         for c in cs:
@@ -49,7 +50,8 @@ class FakeIB:
         self.n += 1
         self.sent.append(order)
         n, self._trade = self.n, None
-        fills = [NS(execution=NS(execId=f"0001.{n}.01"))]
+        fills = [NS(execution=NS(execId=f"0001.{n}.01"),
+                    commissionReport=NS(execId=f"0001.{n}.01" if self.reports else "", commission=1.25))]
         t = NS(order=order, fills=[] if self.fills_after else fills,
                orderStatus=NS(status="Filled", avgFillPrice=10.0, filled=order.totalQuantity))
         self._pending = (t, fills, self.fills_after)
@@ -69,7 +71,7 @@ class FakeIB:
 def broker(ib, ref="magic-formula:20261006-160002") -> Broker:
     b = Broker(dry_run=False)
     b.ib, b.order_ref = ib, ref
-    b.qualify = lambda ticker: NS(symbol=ticker)
+    b.qualify = lambda ticker: NS(symbol=ticker, conId=265598, currency="USD")
     return b
 
 
@@ -101,10 +103,12 @@ check("an FX sweep returns its execution ids", fx.get("exec_ids") == ["0001.1.01
 print("\nLEDGER")
 st = PortfolioState()
 st.open_position(Position("AAPL", 3, buy["fill_price"], "2026-10-06",
-                          entry_order_ref=buy["order_ref"], entry_exec_ids=buy["exec_ids"]))
+                          entry_order_ref=buy["order_ref"], entry_exec_ids=buy["exec_ids"],
+                          entry_conid=buy["conid"], entry_commission=buy["commission"]))
 sell = b.order("AAPL", "SELL", 3, wait=2)
 rec = st.close_position("AAPL", sell["fill_price"], 1.0, "2026-11-05", "test",
-                        order_ref=sell["order_ref"], exec_ids=sell["exec_ids"])
+                        order_ref=sell["order_ref"], exec_ids=sell["exec_ids"],
+                        commission=sell["commission"])
 check("a closed trade keeps the ENTRY tag and execution ids",
       rec["entry_order_ref"] == "magic-formula:20261006-160002"
       and rec["entry_exec_ids"] == ["0001.1.01"], str(rec))
@@ -146,6 +150,20 @@ check("...and its orderRef", race.get("order_ref") == "magic-formula:20261006-16
 # RUNNER WIRING. Everything above hands the broker its tag by hand, so it cannot see the runner
 # forgetting to: deleting that one line in run_paper.py sent every order out untagged while all
 # of the above stayed green. These pin the runner's own wiring.
+print("\nCONID / COMMISSION / CURRENCY (additive, 2026-10-07)")
+check("a filled order returns its conid, commission and currency",
+      buy.get("conid") == 265598 and buy.get("commission") == 1.25 and buy.get("currency") == "USD",
+      str(buy))
+nr = broker(FakeIB(reports=False)).order("AAPL", "BUY", 1, wait=2)
+check("commission reports that never arrive -> commission None, and the order still succeeds",
+      nr.get("ok") is True and nr.get("status") == "Filled" and nr.get("commission") is None
+      and nr.get("exec_ids"), str(nr))
+check("a closed trade records conid, entry and exit commission",
+      rec.get("conid") == 265598 and rec.get("entry_commission") == 1.25
+      and rec.get("exit_commission") == 1.25, str(rec))
+check("a position saved before these fields existed loads with conid 0 / commission None",
+      old.entry_conid == 0 and old.entry_commission is None, str(old))
+
 print("\nRUNNER WIRING")
 import inspect  # noqa: E402
 import re  # noqa: E402
@@ -190,7 +208,8 @@ class LinkBroker:
     def order(self, ticker, action, shares, wait=20.0):
         self.n += 1
         return {"ok": True, "status": "Filled", "fill_price": 100.0,
-                "exec_ids": [f"E{self.n}.{ticker}"], "order_ref": f"magic-formula:RUN-{action}"}
+                "exec_ids": [f"E{self.n}.{ticker}"], "order_ref": f"magic-formula:RUN-{action}",
+                "conid": 1000 + self.n, "commission": 1.0 + self.n / 100, "currency": "USD"}
 
 
 _today = "2026-08-17"
@@ -221,6 +240,11 @@ check("a SELL placed by run_daily stores the EXIT tag and execution ids",
       len(_sold) == 1 and _sold[0]["exit_order_ref"] == "magic-formula:RUN-SELL"
       and len(_sold[0]["exit_exec_ids"]) == 1 and _sold[0]["exit_exec_ids"][0].endswith(".OLD"),
       str(_sold))
+check("run_daily stores each BUY's conid and commission on the position",
+      bool(_new) and all(p.entry_conid > 1000 and p.entry_commission and p.entry_commission > 1.0
+                         for p in _new), str([(p.ticker, p.entry_conid, p.entry_commission) for p in _new]))
+check("run_daily stores the SELL's commission on the closed trade",
+      len(_sold) == 1 and (_sold[0].get("exit_commission") or 0) > 1.0, str(_sold))
 check("...and keeps the ENTRY tag and execution ids of the position it closed",
       len(_sold) == 1 and _sold[0]["entry_order_ref"] == "magic-formula:OLD-RUN"
       and _sold[0]["entry_exec_ids"] == ["X1"], str(_sold))
