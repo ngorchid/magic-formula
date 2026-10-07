@@ -135,6 +135,7 @@ date × sleeve × category.
 | Interest in a foreign currency; FX translation of foreign cash | magic-formula |
 | Interest in the base currency (USD) | **book** |
 | Market-data subscription fees | **options-vrp** |
+| VAT / sales tax on a fee (statement-of-funds code `STAX`, category `sales_tax`) | follows the fee it is charged on: market data → **options-vrp**, any other fee → book |
 | Other account fees | book |
 | Deposits / withdrawals | capital (not P&L) |
 | **Stock delivered by an options-vrp assignment/exercise** (2026-10-07) | **options-vrp** — when a stock row on the option's underlying lands within `DELIVERY_WINDOW_DAYS` = 3 trading days of the event; that row and every later row on the stock (dividends, the sale) follow. Each delivery row records how it was identified: `delivery_match` = **fingerprint** (exactly multiplier × contracts, at exactly the strike) or **window** (the fallback). If magic-formula has a tagged trade in the same conid → **conflict** (alert). Rows from before the event keep the normal rule |

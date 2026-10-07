@@ -85,4 +85,13 @@ w = [x for x in (d.rebuild_tables() and d.audit_checks(COUNTS)) if "registry was
 check("a registry missing AFTER it was first seeded alerts (and is re-seeded)",
       len(w) == 1 and (d.RECORDS / "description_registry.json").exists(), str(w))
 
+print("\nVAT ON FEES (STAX) IS TRACKED TOO")
+put("20261106", "20261112", (
+    '<StatementOfFundsLine transactionID="v1" activityCode="STAX" amount="-0.38" '
+    'activityDescription="VAT n******05:US Equity and Options Add-On Streaming Bundle Non-Professional" '
+    'currency="USD" fxRateToBase="1" levelOfDetail="BaseCurrency" date="20261106"/>'), "2026-11-12T08:30:00")
+w = audit()
+check("the first VAT line on a fee is reported once (category sales_tax), naming its sleeve",
+      len(w) == 1 and "Streaming Bundle" in w[0] and "assigned to options-vrp" in w[0], str(w))
+
 finish("description-registry")

@@ -66,6 +66,10 @@ MUTATIONS = [
     ('bad = [r for r in rows if r.get("sleeve") in ("unassigned", "conflict")]', 'bad = []',
      "audit stops flagging unattributable rows"),
 
+    ('"STAX": "sales_tax",', '', "VAT on fees (STAX) unmapped -> unassigned alert"),
+    ('if category in ("fee", "sales_tax") and not row.get("conid"):', 'if category == "fee" and not row.get("conid"):',
+     "VAT on fees not attributed like the fee it is charged on"),
+
     # --- reconciliation ---
     ('max(0.05, 0.001 * abs(want))', 'max(1e9, 0.001 * abs(want))', "reconciliation tolerance made huge"),
     ('max(0.05, 0.001 * abs(want))', 'max(0.0, 0.0 * abs(want))', "reconciliation tolerance zero (false alarms)"),

@@ -171,6 +171,9 @@ inner = "".join([
     sof(31, "ADJ", "-0.004", "FX Translations P&L"),
     sof(32, "ADJ", "5", "STOCK ADJUSTMENT", conid="265598", cat="STK"),
     sof(33, "DINT", "-0.58", "EUR Debit Interest for Sep-2026"),   # base row: currency says USD
+    # VAT on fees (code STAX, seen live 2026-10-08): follows the fee it is charged on
+    sof(34, "STAX", "-0.38", "VAT n******05:US Equity and Options Add-On Streaming Bundle Non-Professional"),
+    sof(35, "STAX", "-0.21", "VAT n******05:ACTIVITY FEE"),
 ])
 with _At("2026-10-07T08:30:00"):
     d.archive(stmt("20261001", "20261007", inner), "999")
@@ -209,6 +212,11 @@ check("ADJ on a stock is an 'adjustment', not futures variation margin",
 dint = by(sf, "transactionID", "33")
 check("base-currency ledger row: interest currency read from the description (EUR -> magic)",
       dint.get("sleeve") == "magic-formula", str(dint))
+vat_md, vat_other = by(sf, "transactionID", "34"), by(sf, "transactionID", "35")
+check("VAT (STAX) on the market-data bundle -> options-vrp, category sales_tax",
+      vat_md.get("sleeve") == "options-vrp" and vat_md.get("category") == "sales_tax", str(vat_md))
+check("VAT (STAX) on any other fee -> book", vat_other.get("sleeve") == "book"
+      and vat_other.get("category") == "sales_tax", str(vat_other))
 summ = table("attribution_summary")
 check("attribution_summary totals the ledger by sleeve x category",
       any(r["sleeve"] == "trend-overlay" and r["category"] == "futures_mtm"

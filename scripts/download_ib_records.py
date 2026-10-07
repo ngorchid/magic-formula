@@ -240,6 +240,9 @@ SOF_CODE_CATEGORY = {
     "INT": "interest", "DIV": "dividend", "PIL": "dividend", "FRTAX": "withholding_tax",
     "WHT": "withholding_tax", "OFEE": "fee", "FEE": "fee", "DEP": "capital", "WITH": "capital",
     "CA": "corporate_action", "TTAX": "transaction_tax", "SLINC": "securities_lending",
+    # STAX = sales tax / VAT that IB charges ON a fee (e.g. on the market-data subscription,
+    # first seen 2026-10-08). It follows the fee it is charged on -- see attribute().
+    "STAX": "sales_tax",
 }
 
 
@@ -347,7 +350,8 @@ def attribute(row: dict, category: str, owners: dict[str, str], base: str,
         return "book" if _interest_ccy(row) == base else "magic-formula"
     if category == "fx_translation":
         return "magic-formula"            # revaluation of the foreign balances its trades create
-    if category == "fee" and not row.get("conid"):
+    if category in ("fee", "sales_tax") and not row.get("conid"):
+        # VAT on a fee goes where the fee goes: market data -> options-vrp, any other -> book.
         return "options-vrp" if any(w in desc for w in MARKET_DATA_WORDS) else "book"
     if row.get("conid") or row.get("assetCategory"):
         return _instrument_sleeve(row, owners, delivered)
@@ -557,7 +561,7 @@ def audit_checks(counts: dict[str, int]) -> list[str]:
 # ISINs stripped) and kept in description_registry.json; the first time an UNSEEN one appears it
 # is reported once, with the sleeve it was given. A missing registry is SEEDED silently from the
 # statements already archived, so deployment does not alert on every historical line.
-REGISTRY_CATEGORIES = {"fee", "interest", "other", "adjustment"}
+REGISTRY_CATEGORIES = {"fee", "interest", "other", "adjustment", "sales_tax"}
 _MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
 
 
