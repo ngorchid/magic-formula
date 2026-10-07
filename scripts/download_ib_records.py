@@ -27,7 +27,9 @@ Yes". tables/trades.csv adds `strategy` and `run_id` columns parsed from it; unt
 trades, manual trades, FX sweeps placed before tagging) are left blank and counted in the log.
 
 Env (live .env): FLEX_TOKEN, FLEX_QUERY_ID, optional IB_RECORDS_DIR, EXPECT_ACCOUNT (U27760647),
-EMAIL_USER/EMAIL_PASS/TO_EMAIL for the failure alert.
+EMAIL_USER/EMAIL_PASS/TO_EMAIL for the alerts and the daily one-line success email; for the
+two-way execution check MAGIC_STATE / TREND_STATE / OPTIONS_STATE (the sleeve ledgers, read-only);
+optional HEARTBEAT_URL (dead-man's switch, pinged after each completed run).
 
 Run:  python scripts/download_ib_records.py            # download + rebuild tables
       python scripts/download_ib_records.py --rebuild  # rebuild tables from raw only (offline)
@@ -39,11 +41,12 @@ import csv
 import hashlib
 import json
 import os
+import re
 import smtplib
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.parse import urlencode
@@ -260,12 +263,80 @@ def _conid_owners(trades: dict[tuple, dict]) -> dict[str, str]:
     return owners
 
 
-def _instrument_sleeve(row: dict, owners: dict[str, str]) -> str:
+# DELIVERED SHARES (owner's rule, 2026-10-07). An assigned short put delivers stock: an UNTAGGED
+# STK row on the option's underlying. By asset class it would land on magic-formula, which never
+# traded it. So: when options-vrp had an assignment/exercise on an underlying and a stock row on
+# that underlying appears within DELIVERY_WINDOW_DAYS trading days, the stock -- and every later
+# row on it (dividends, the eventual sale) -- belongs to options-vrp. If magic-formula has a
+# TAGGED trade in the same conid the row is "conflict" (two owners), never silently picked.
+DELIVERY_WINDOW_DAYS = 3     # IB books the delivery on the assignment date; 3 covers a weekend +
+                             # a late statement row without catching an unrelated later trade
+
+
+def _row_date(row: dict) -> str:
+    """YYYYMMDD of a Flex row, whatever date field that row type carries."""
+    for f in ("tradeDate", "date", "reportDate", "dateTime"):
+        v = (row.get(f) or "").replace("-", "")[:8]
+        if len(v) == 8 and v.isdigit():
+            return v
+    return ""
+
+
+def _add_trading_days(yyyymmdd: str, n: int) -> str:
+    d = datetime.strptime(yyyymmdd, "%Y%m%d")
+    while n > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d.strftime("%Y%m%d")
+
+
+def _vrp_deliveries(rows: dict[str, dict[tuple, dict]], owners: dict[str, str]) -> dict[str, str]:
+    """{underlying conid -> date of the options-vrp assignment/exercise that delivered stock}."""
+    out: dict[str, str] = {}
+    stock = [t for t in rows.get("trades", {}).values()
+             if t.get("assetCategory") == "STK" and not t.get("strategy")]
+    for r in rows.get("option_exercises", {}).values():
+        kind = r.get("transactionType", "")
+        if not ("Assign" in kind or "Exercise" in kind):
+            continue
+        if _instrument_sleeve(r, owners) != "options-vrp":
+            continue
+        uc, ev = r.get("underlyingConid", ""), _row_date(r)
+        if not (uc and ev):
+            continue
+        last = _add_trading_days(ev, DELIVERY_WINDOW_DAYS)
+        window = [t for t in stock if t.get("conid") == uc and ev <= _row_date(t) <= last]
+        if not window:
+            continue
+        # FINGERPRINT (owner's rule, 2026-10-07): delivered shares come in exactly
+        # multiplier x contracts, at exactly the strike -- near-unique. The window alone is the
+        # fallback; each delivery row records which test identified it.
+        shares = abs(float(r.get("quantity") or 0)) * float(r.get("multiplier") or 100)
+        strike = r.get("strike")
+        for t in window:
+            fp = (strike not in (None, "") and abs(abs(float(t.get("quantity") or 0)) - shares) < 1e-9
+                  and abs(float(t.get("tradePrice") or 0) - float(strike)) < 0.01)
+            t["delivery_match"] = "fingerprint" if fp else "window"
+        out[uc] = min(out.get(uc, ev), ev)
+    return out
+
+
+def _delivered_owner(tagged_owner: str | None) -> str:
+    return "options-vrp" if tagged_owner in (None, "", "options-vrp") else "conflict"
+
+
+def _instrument_sleeve(row: dict, owners: dict[str, str],
+                       delivered: dict[str, str] | None = None) -> str:
+    ev = (delivered or {}).get(row.get("conid", ""))
+    if ev and row.get("assetCategory", "STK") in ("STK", "") and _row_date(row) >= ev:
+        return _delivered_owner(owners.get(row.get("conid", "")))
     return (owners.get(row.get("conid", ""))
             or ASSET_SLEEVE.get(row.get("assetCategory", ""), "unassigned"))
 
 
-def attribute(row: dict, category: str, owners: dict[str, str], base: str) -> str:
+def attribute(row: dict, category: str, owners: dict[str, str], base: str,
+              delivered: dict[str, str] | None = None) -> str:
     """The sleeve (or 'book' / 'capital' / 'unassigned') a cash event belongs to."""
     desc = (row.get("description") or row.get("activityDescription") or "").upper()
     if category == "capital":
@@ -279,7 +350,7 @@ def attribute(row: dict, category: str, owners: dict[str, str], base: str) -> st
     if category == "fee" and not row.get("conid"):
         return "options-vrp" if any(w in desc for w in MARKET_DATA_WORDS) else "book"
     if row.get("conid") or row.get("assetCategory"):
-        return _instrument_sleeve(row, owners)
+        return _instrument_sleeve(row, owners, delivered)
     return "unassigned"
 
 
@@ -299,23 +370,25 @@ def _category(row: dict, base_category: str) -> str:
 def _apply_attribution(rows: dict[str, dict[tuple, dict]]) -> None:
     """Add `sleeve` and `category` columns to every cash-type table (in place)."""
     owners = _conid_owners(rows.get("trades", {}))
+    delivered = _vrp_deliveries(rows, owners)
     acct = next(iter(rows.get("account_information", {}).values()), {})
     base = acct.get("currency") or "USD"
     for t in rows.get("trades", {}).values():
-        t["sleeve"] = t.get("strategy") or _instrument_sleeve(t, owners)
+        t["sleeve"] = t.get("strategy") or _instrument_sleeve(t, owners, delivered)
         t["category"] = "trade"
     for r in rows.get("cash_transactions", {}).values():
         r["category"] = _category(r, CASH_TYPE_CATEGORY.get(r.get("type", ""), "other"))
-        r["sleeve"] = attribute(r, r["category"], owners, base)
+        r["sleeve"] = attribute(r, r["category"], owners, base, delivered)
     for r in rows.get("statement_of_funds", {}).values():
         code = r.get("activityCode", "")
         r["category"] = _category(r, SOF_CODE_CATEGORY.get(code, "other" if code else "balance"))
-        r["sleeve"] = "-" if r["category"] == "balance" else attribute(r, r["category"], owners, base)
+        r["sleeve"] = ("-" if r["category"] == "balance"
+                       else attribute(r, r["category"], owners, base, delivered))
     for name, cat in (("corporate_actions", "corporate_action"), ("option_exercises", "option_event"),
                       ("transaction_taxes", "transaction_tax"), ("fx_transactions", "fx")):
         for r in rows.get(name, {}).values():
             r["category"] = cat
-            r["sleeve"] = (_instrument_sleeve(r, owners) if cat != "fx"
+            r["sleeve"] = (_instrument_sleeve(r, owners, delivered) if cat != "fx"
                            else ("book" if r.get("fxCurrency") == base else "magic-formula"))
 
 
@@ -472,8 +545,527 @@ def audit_checks(counts: dict[str, int]) -> list[str]:
                                 f"{r.get('description', '')} — check that sleeve's ledger")
                     seen.add(key)
             seen_file.write_text(json.dumps(sorted(seen), indent=1))
+    warn += check_descriptions()
     warn += reconcile_latest()
     return warn
+
+
+# ---------------------------------------------------------------------------------------------
+# UNSEEN-DESCRIPTION REGISTRY (2026-10-07). A fee with no instrument whose description matches no
+# market-data keyword goes to "book"; a reworded OPRA line or a brand-new IB charge would land
+# there silently. So every fee/interest description is normalised (dates, amounts, symbols and
+# ISINs stripped) and kept in description_registry.json; the first time an UNSEEN one appears it
+# is reported once, with the sleeve it was given. A missing registry is SEEDED silently from the
+# statements already archived, so deployment does not alert on every historical line.
+REGISTRY_CATEGORIES = {"fee", "interest", "other", "adjustment"}
+_MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
+
+
+def normalise_description(desc: str, symbol: str = "") -> str:
+    s = (desc or "").upper()
+    if symbol:
+        s = s.replace(symbol.upper(), " ")
+    s = re.sub(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", " ", s)                       # ISIN
+    s = re.sub(rf"\b(?:{_MONTHS})[A-Z]*\.?(?:[-/ ]?\d{{2,4}})?\b", " ", s)  # SEP-2026, OCT 26
+    s = re.sub(r"[^A-Z ]", " ", s)                                        # amounts, ids, punct.
+    return " ".join(s.split())
+
+
+def check_descriptions() -> list[str]:
+    """Report each fee/interest description not seen before (once), then remember it."""
+    seen_rows = []
+    for name, field in (("cash_transactions", "description"),
+                        ("statement_of_funds", "activityDescription")):
+        p = RECORDS / "tables" / f"{name}.csv"
+        if not p.exists():
+            continue
+        with open(p, encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                if r.get("category") in REGISTRY_CATEGORIES and r.get(field):
+                    n = normalise_description(r[field], r.get("symbol", ""))
+                    if n:
+                        seen_rows.append((n, r[field], r.get("sleeve", ""), _row_date(r)))
+    reg_file = RECORDS / "description_registry.json"
+    if not reg_file.exists():
+        reg = {n: {"first_seen": d, "example": raw, "sleeve": sl} for n, raw, sl, d in seen_rows}
+        reg_file.write_text(json.dumps(reg, indent=1, sort_keys=True))
+        log(f"description registry seeded with {len(reg)} description(s)")
+        # Silent ONLY the first time. A registry that goes missing LATER (deleted, a restore without
+        # it) would otherwise reseed quietly and hide every description first seen since -- so if
+        # the seeded-marker exists, that case alerts.
+        marker = RECORDS / ".registry_seeded"
+        if not marker.exists():
+            marker.write_text(datetime.now().isoformat(timespec="seconds"))
+        else:
+            return [f"description registry was MISSING and has been re-seeded from the archive "
+                    f"({len(reg)} descriptions) — any fee/interest description first seen since it "
+                    f"was lost can no longer be told apart; review description_registry.json"]
+        return []
+    reg = json.loads(reg_file.read_text())
+    warn = []
+    for n, raw, sl, d in seen_rows:
+        if n in reg:
+            continue
+        warn.append(f"NEW fee/interest description, assigned to {sl or '?'}: '{raw}' — "
+                    f"check the attribution rule covers it")
+        reg[n] = {"first_seen": d, "example": raw, "sleeve": sl}
+    reg_file.write_text(json.dumps(reg, indent=1, sort_keys=True))
+    return warn
+
+
+# ---------------------------------------------------------------------------------------------
+# TWO-WAY EXECUTION CHECK (2026-10-07): IB's Flex executions <-> the sleeves' own ledgers, keyed
+# on the IB execution id (Flex `ibExecID`). Flex is the authority. Read-only on the ledgers.
+#
+#   matched              every id of a ledger fill is in Flex and the fields agree
+#   field_mismatch       ids found, but contract / side / quantity / price disagree
+#   ledger_not_in_flex   a ledger id Flex does not have, on a date Flex COVERS
+#   flex_tagged_unbooked a tagged Flex execution no ledger references  -> a sleeve failed to book
+#   flex_untagged        an untagged one -> manual trade or tagging failure (assignment/exercise
+#                        deliveries are labelled as such)
+#   linked_by_tag_only   a ledger fill with a tag but no ids (options-vrp self-heal books late
+#                        fills that way) matched on tag + contract + side + quantity; for
+#                        options-vrp the real ids are written to tables/exec_backfill.csv, which
+#                        options-vrp applies to its OWN ledger (this job never writes a ledger)
+#   fx_sweep_unledgered  magic-formula FX sweeps: tagged, deliberately not in its ledger
+#
+# NOT compared, because no ledger records them: commission and conid. The contract is compared by
+# its description instead (symbol; future root + expiry; option underlying/expiry/strike/right).
+# Combos are compared at LEG level. PROVISIONAL until checked on real VRP fills: the API returns
+# a combo-level execution id besides the legs', which Flex may not report; one missing id on a
+# spread whose two legs both matched is therefore treated as that combo-level id.
+LINKED_FROM = "20261006"          # first day orders carried a tag and ledgers kept exec ids
+AGEING_DAYS = 3                   # a ledger id still not covered by any statement after this
+                                  # many business days alerts (IB lag is normally one day)
+assignments: list[dict] = []      # options-vrp ASSIGNED events, read from its ledger
+LEDGERS = {
+    "magic-formula": Path(os.getenv("MAGIC_STATE", str(ROOT / "results" / "paper" / "state.json"))),
+    "trend-overlay": Path(os.getenv("TREND_STATE",
+        r"C:\Users\Nicolas\PycharmProjects\trend-overlay-live\results\paper\state.json")),
+    "options-vrp": Path(os.getenv("OPTIONS_STATE",
+        r"C:\Users\Nicolas\PycharmProjects\options-vrp-live\results\paper\state.json")),
+}
+FAIL_CLASSES = ("field_mismatch", "ledger_not_in_flex", "flex_tagged_unbooked", "flex_untagged",
+                "not_covered_aged")
+
+
+def _iso8(d: str) -> str:
+    return (d or "").replace("-", "")[:8]
+
+
+def _sym(s: str) -> str:
+    """IB stock symbol, separators dropped ('VOLV.B', 'BRK B' -> 'VOLVB', 'BRKB')."""
+    return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+
+
+def _stk_root(ticker: str) -> str:
+    t = (ticker or "").upper()
+    if "." in t and 1 <= len(t.rsplit(".", 1)[1]) <= 3 and t.rsplit(".", 1)[1].isalpha():
+        t = t.rsplit(".", 1)[0]                       # yfinance exchange suffix (.DE, .ST, ...)
+    return re.sub(r"[^A-Z0-9]", "", t)
+
+
+def _conids(row: dict, *keys: str) -> list[str]:
+    """Contract ids a ledger row recorded (additive field since 2026-10-07; [] on older rows)."""
+    for k in (keys or ("conids", "conid")):
+        v = row.get(k)
+        if v in (None, "", 0, []):
+            continue
+        return [str(x) for x in (v if isinstance(v, list) else [v]) if x not in (None, "", 0)]
+    return []
+
+
+def _ledger_fills() -> tuple[list[dict], list[str]]:
+    """Every fill the three ledgers record, normalised. Returns (fills, unavailable sleeves).
+    Also fills the module-level `assignments` list (options-vrp ASSIGNED events)."""
+    fills, missing = [], []
+    assignments.clear()
+    for sleeve, path in LEDGERS.items():
+        if not Path(path).exists():
+            missing.append(sleeve)
+            continue
+        try:
+            st = json.loads(Path(path).read_text())
+        except Exception:  # noqa: BLE001
+            missing.append(sleeve)
+            continue
+        if sleeve == "magic-formula":
+            legs = []
+            for p in st.get("positions", []):
+                legs.append(("BUY", p.get("ticker"), p.get("shares"), p.get("entry_price"),
+                             p.get("entry_date"), p.get("entry_order_ref", ""),
+                             p.get("entry_exec_ids") or [], _conids(p, "entry_conid"),
+                             p.get("entry_commission"), p.get("currency")))
+            for t in st.get("trade_log", []):
+                legs.append(("BUY", t.get("ticker"), t.get("shares"), t.get("entry_price"),
+                             t.get("entry_date"), t.get("entry_order_ref", ""),
+                             t.get("entry_exec_ids") or [], _conids(t, "conid"),
+                             t.get("entry_commission"), t.get("currency")))
+                legs.append(("SELL", t.get("ticker"), t.get("shares"), t.get("exit_price"),
+                             t.get("exit_date"), t.get("exit_order_ref", ""),
+                             t.get("exit_exec_ids") or [], _conids(t, "conid"),
+                             t.get("exit_commission"), t.get("currency")))
+            for side, tk, qty, px, dt, ref, ids, cids, comm, ccy in legs:
+                fills.append({"sleeve": sleeve, "date": _iso8(dt), "order_ref": ref,
+                              "exec_ids": list(ids), "kind": "STK", "price": px,
+                              "legs": [{"key": ("STK", _stk_root(tk)), "side": side,
+                                        "qty": abs(float(qty or 0))}],
+                              "conids": cids, "commission": comm, "currency": ccy,
+                              "ref": f"{tk} {side} {dt}"})
+        elif sleeve == "trend-overlay":
+            for t in st.get("trade_log", []):
+                if "signed_qty" not in t:             # malformed row
+                    continue
+                # RESYNC rows (ledger snapped to IB) carry neither a tag nor ids, so they are
+                # never matched and never reported -- they are bookkeeping, not fills.
+                q = float(t.get("signed_qty") or 0)
+                fills.append({"sleeve": sleeve, "date": _iso8(t.get("date")),
+                              "order_ref": t.get("order_ref", ""),
+                              "exec_ids": list(t.get("exec_ids") or []), "kind": "FUT",
+                              "price": t.get("price"), "conids": _conids(t),
+                              "commission": t.get("commission"), "currency": t.get("currency"),
+                              "legs": [{"key": ("FUT", (t.get("symbol") or "").upper(),
+                                                _iso8(t.get("expiry"))),
+                                        "side": "BUY" if q > 0 else "SELL", "qty": abs(q)}],
+                              "ref": f"{t.get('market')} {t.get('symbol')} {t.get('expiry')} "
+                                     f"{q:+g} {t.get('date')}"})
+        else:
+            for t in st.get("trade_log", []):
+                act = t.get("action")
+                if act in ("ASSIGNED", "ASSIGNED_STOCK_SOLD", "ASSIGNED_LONG_SOLD") and t.get("key"):
+                    try:
+                        tk, exp, ks, kl = t["key"].rsplit("_", 3)
+                    except ValueError:
+                        continue
+                    if act == "ASSIGNED":
+                        assignments.append({"ticker": tk.upper(), "expiry": _iso8(exp),
+                                            "strike": float(ks), "contracts": float(t.get("contracts") or 0),
+                                            "shares": float(t.get("shares") or 0),
+                                            "date": _iso8(t.get("date"))})
+                        continue
+                    if act == "ASSIGNED_STOCK_SOLD":
+                        legs = [{"key": ("STK", tk.upper()), "side": "SELL",
+                                 "qty": abs(float(t.get("shares") or 0))}]
+                    else:
+                        legs = [{"key": ("OPT", tk.upper(), _iso8(exp), float(kl), "P"),
+                                 "side": "SELL", "qty": abs(float(t.get("contracts") or 0))}]
+                    fills.append({"sleeve": sleeve, "date": _iso8(t.get("date")),
+                                  "order_ref": t.get("order_ref", ""),
+                                  "exec_ids": list(t.get("exec_ids") or []), "kind": "LEG",
+                                  "price": t.get("price"), "legs": legs,
+                                  "conids": _conids(t), "commission": t.get("commission"),
+                                  "currency": t.get("currency"),
+                                  "ref": f"{t['key']} {act} {t.get('date')}"})
+                    continue
+                if act not in ("OPEN", "CLOSE") or not t.get("key"):
+                    continue
+                try:
+                    tk, exp, ks, kl = t["key"].rsplit("_", 3)
+                except ValueError:
+                    continue
+                n = abs(float(t.get("contracts") or 0))
+                short_side, long_side = ("SELL", "BUY") if act == "OPEN" else ("BUY", "SELL")
+                fills.append({"sleeve": sleeve, "date": _iso8(t.get("date")),
+                              "order_ref": t.get("order_ref", ""),
+                              "exec_ids": list(t.get("exec_ids") or []), "kind": "OPT",
+                              "price": t.get("credit") if act == "OPEN" else t.get("close_value"),
+                              "conids": _conids(t), "commission": t.get("commission"),
+                              "currency": t.get("currency"),
+                              "action": act, "key": t["key"],
+                              "legs": [{"key": ("OPT", tk.upper(), _iso8(exp), float(ks), "P"),
+                                        "side": short_side, "qty": n},
+                                       {"key": ("OPT", tk.upper(), _iso8(exp), float(kl), "P"),
+                                        "side": long_side, "qty": n}],
+                              "ref": f"{t['key']} {act} {t.get('date')}"})
+    return fills, missing
+
+
+def _flex_key(e: dict) -> tuple:
+    cat = e.get("assetCategory", "")
+    if cat == "OPT":
+        return ("OPT", (e.get("underlyingSymbol") or "").upper(), _iso8(e.get("expiry")),
+                float(e.get("strike") or 0), (e.get("putCall") or "").upper()[:1])
+    if cat == "FUT":
+        return ("FUT", (e.get("underlyingSymbol") or e.get("symbol") or "").upper(),
+                _iso8(e.get("expiry")))
+    return (cat, _sym(e.get("symbol", "")))
+
+
+def _side(e: dict) -> str:
+    bs = (e.get("buySell") or "").upper()
+    if bs in ("BUY", "SELL"):
+        return bs
+    return "BUY" if float(e.get("quantity") or 0) > 0 else "SELL"
+
+
+def _coverage() -> list[tuple[str, str]]:
+    out = []
+    for p in sorted((RECORDS / "raw").rglob("*.xml")):
+        for stmt in ET.parse(p).getroot().iter("FlexStatement"):
+            if stmt.get("fromDate") and stmt.get("toDate"):
+                out.append((stmt.get("fromDate"), stmt.get("toDate")))
+    return out
+
+
+def _compare(fill: dict, execs: list[dict]) -> list[str]:
+    """Field differences between one ledger fill and the Flex executions of its ids."""
+    diffs = []
+    legs = fill["legs"]
+    keyf = _flex_key
+    cids = fill.get("conids") or []
+    if cids and len(cids) == len(legs):
+        # Recorded contract ids replace the description match: no spelling workarounds, and a
+        # leg is identified by the id IB itself assigned (ledger order = leg order).
+        legs = [dict(leg, key=("CONID", c)) for leg, c in zip(legs, cids)]
+        keyf = lambda e: ("CONID", str(e.get("conid")))  # noqa: E731
+    extra = []                    # commission / currency: reported alongside, never instead of
+    if fill.get("commission") not in (None, ""):
+        flex_comm = sum(abs(float(e.get("ibCommission") or 0)) for e in execs)
+        if abs(flex_comm - abs(float(fill["commission"]))) > 0.02:
+            extra.append(f"commission: ledger {abs(float(fill['commission'])):.2f} vs Flex {flex_comm:.2f}")
+    if fill.get("currency") and any(e.get("currency") and e.get("currency") != fill["currency"]
+                                    for e in execs):
+        extra.append(f"currency: ledger {fill['currency']} vs Flex "
+                     f"{sorted({e.get('currency') for e in execs})}")
+    want = {(leg["key"], leg["side"]): leg["qty"] for leg in legs}
+    got: dict[tuple, float] = {}
+    for e in execs:
+        k = (keyf(e), _side(e))
+        got[k] = got.get(k, 0.0) + abs(float(e.get("quantity") or 0))
+    contracts_w = {k for k, _ in want}
+    contracts_g = {k for k, _ in got}
+    if contracts_w != contracts_g:
+        diffs.append(f"contract ledger {sorted(map(str, contracts_w))} vs Flex "
+                     f"{sorted(map(str, contracts_g))}")
+    else:
+        for k, q in want.items():
+            if k not in got:
+                diffs.append(f"side: Flex has no {k[1]} of {k[0]}")
+            elif abs(got[k] - q) > 1e-9:
+                diffs.append(f"quantity {k[0]} {k[1]}: ledger {q:g} vs Flex {got[k]:g}")
+    if diffs or fill.get("price") in (None, ""):
+        return diffs + extra
+    lp = float(fill["price"])
+    if fill["kind"] == "OPT":
+        n = fill["legs"][0]["qty"] or 1.0
+        net = 0.0
+        for e in execs:
+            sgn = -1.0 if _side(e) == "BUY" else 1.0      # OPEN credit = sells - buys
+            net += sgn * float(e.get("tradePrice") or 0) * abs(float(e.get("quantity") or 0))
+        fp = net / n if fill.get("action") == "OPEN" else -net / n
+        tol = 0.01
+    else:
+        q = sum(abs(float(e.get("quantity") or 0)) for e in execs) or 1.0
+        fp = sum(float(e.get("tradePrice") or 0) * abs(float(e.get("quantity") or 0))
+                 for e in execs) / q
+        tol = max(0.005, 1e-4 * abs(fp))
+    if abs(fp - lp) > tol:
+        diffs.append(f"price: ledger {lp:g} vs Flex {fp:g}")
+    return diffs + extra
+
+
+def _assignment_for(e: dict, date: str) -> str:
+    """Detail string if this untagged Flex execution is IB's side of an assignment options-vrp
+    recorded (its ledger's ASSIGNED row), else "". Two shapes: the delivered STOCK (BUY,
+    100 x contracts, at the short strike) and the assigned short OPTION leg itself. IB books the
+    assignment on day T; options-vrp records it at its next run, so the ledger date is on or up to
+    DELIVERY_WINDOW_DAYS trading days after the Flex date."""
+    for a in assignments:
+        if not (a["date"] and date <= a["date"] <= _add_trading_days(date, DELIVERY_WINDOW_DAYS)):
+            continue
+        cat = e.get("assetCategory")
+        if (cat == "STK" and _sym(e.get("symbol", "")) == _sym(a["ticker"]) and _side(e) == "BUY"
+                and abs(abs(float(e.get("quantity") or 0)) - a["shares"]) < 1e-9
+                and abs(float(e.get("tradePrice") or 0) - a["strike"]) < 0.01):
+            return f"delivery of {a['shares']:g} {a['ticker']} at {a['strike']:g} (VRP ASSIGNED row)"
+        if (cat == "OPT" and _flex_key(e) == ("OPT", a["ticker"], a["expiry"], a["strike"], "P")
+                and abs(abs(float(e.get("quantity") or 0)) - a["contracts"]) < 1e-9):
+            return f"assigned short {a['strike']:g}P x{a['contracts']:g} (VRP ASSIGNED row)"
+    return ""
+
+
+def reconcile_executions() -> tuple[list[str], dict[str, int]]:
+    """Two-way check; writes tables/exec_reconciliation.csv and tables/exec_backfill.csv.
+    Returns (warnings, counts per class)."""
+    trades_p = RECORDS / "tables" / "trades.csv"
+    flex = []
+    if trades_p.exists():
+        with open(trades_p, encoding="utf-8") as f:
+            flex = [r for r in csv.DictReader(f)
+                    if r.get("ibExecID") and r.get("levelOfDetail", "EXECUTION") in ("EXECUTION", "")
+                    and r.get("assetCategory") != "BAG"]
+    by_id = {r["ibExecID"]: r for r in flex}
+    cover = _coverage()
+    covered = lambda d: any(a <= d <= b for a, b in cover)  # noqa: E731
+    fills, missing_ledgers = _ledger_fills()
+    today = datetime.now().strftime("%Y%m%d")
+    out, backfill, used = [], [], set()
+    counts: dict[str, int] = {}
+
+    def emit(cls, sleeve, date, ref, ids, detail=""):
+        counts[cls] = counts.get(cls, 0) + 1
+        out.append({"class": cls, "sleeve": sleeve, "date": date, "ref": ref,
+                    "exec_ids": ";".join(ids), "detail": detail})
+
+    for fl in fills:
+        if fl["exec_ids"]:
+            found = [by_id[i] for i in fl["exec_ids"] if i in by_id]
+            absent = [i for i in fl["exec_ids"] if i not in by_id]
+            used.update(i for i in fl["exec_ids"] if i in by_id)
+            legs_found = {_flex_key(e) for e in found}
+            if (absent and fl["kind"] == "OPT" and len(absent) == 1
+                    and legs_found == {leg["key"] for leg in fl["legs"]}):
+                absent = []                            # the combo-level id (PROVISIONAL rule)
+            if absent and not found:
+                if covered(fl["date"]):
+                    emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], absent,
+                         "no execution with these ids in any Flex statement covering this date")
+                elif fl["date"] and _add_trading_days(fl["date"], AGEING_DAYS) < today:
+                    emit("not_covered_aged", fl["sleeve"], fl["date"], fl["ref"], fl["exec_ids"],
+                         f"no statement covers this date after {AGEING_DAYS} business days — is "
+                         f"the download stuck or the Flex window too short?")
+                else:
+                    emit("not_yet_covered", fl["sleeve"], fl["date"], fl["ref"], fl["exec_ids"])
+                continue
+            if absent and covered(fl["date"]):
+                emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], absent,
+                     "part of this fill's ids are missing from Flex")
+                continue
+            diffs = _compare(fl, found)
+            if diffs:
+                emit("field_mismatch", fl["sleeve"], fl["date"], fl["ref"], fl["exec_ids"],
+                     "; ".join(diffs))
+            else:
+                emit("matched", fl["sleeve"], fl["date"], fl["ref"], fl["exec_ids"])
+        elif fl["order_ref"] and fl["date"] >= LINKED_FROM:
+            cand = [e for e in flex if e.get("orderReference") == fl["order_ref"]
+                    and e["ibExecID"] not in used
+                    and any(_flex_key(e) == leg["key"] and _side(e) == leg["side"]
+                            for leg in fl["legs"])]
+            if cand and not _compare(fl, cand):
+                ids = [e["ibExecID"] for e in cand]
+                used.update(ids)
+                emit("linked_by_tag_only", fl["sleeve"], fl["date"], fl["ref"], ids,
+                     "ledger has the tag but no execution ids")
+                if fl["sleeve"] == "options-vrp":
+                    backfill.append({"sleeve": fl["sleeve"], "date": fl["date"],
+                                     "action": fl.get("action", ""), "key": fl.get("key", ""),
+                                     "order_ref": fl["order_ref"], "exec_ids": ";".join(ids)})
+            elif covered(fl["date"]):
+                emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], [],
+                     f"tag {fl['order_ref']} has no matching Flex executions"
+                     + (f" ({'; '.join(_compare(fl, cand))})" if cand else ""))
+
+    for e in flex:
+        if e["ibExecID"] in used or _iso8(e.get("tradeDate") or e.get("dateTime", "")) < LINKED_FROM:
+            continue
+        strat = e.get("strategy") or _split_ref(e.get("orderReference", ""))[0]
+        desc = f"{e.get('symbol')} {_side(e)} {e.get('quantity')} @ {e.get('tradePrice')}"
+        date = _iso8(e.get("tradeDate") or e.get("dateTime", ""))
+        if strat == "magic-formula" and e.get("assetCategory") == "CASH":
+            emit("fx_sweep_unledgered", strat, date, desc, [e["ibExecID"]])
+        elif strat:
+            emit("flex_tagged_unbooked", strat, date, desc, [e["ibExecID"]],
+                 "ledger unavailable" if strat in missing_ledgers
+                 else f"tagged {e.get('orderReference')} but no {strat} ledger entry has this id")
+        else:
+            codes = {c.strip() for c in (e.get("notes") or "").split(";")}
+            linked = codes & {"A", "Ex", "Ep"} and _assignment_for(e, date)
+            if linked:
+                emit("assignment_linked", "options-vrp", date, desc, [e["ibExecID"]], linked)
+                continue
+            how = ("assignment/exercise delivery" if codes & {"A", "Ex", "Ep"}
+                   else "manual trade or tagging failure")
+            emit("flex_untagged", e.get("sleeve") or "?", date, desc, [e["ibExecID"]], how)
+
+    tdir = RECORDS / "tables"
+    tdir.mkdir(parents=True, exist_ok=True)
+    for name, recs, cols in (("exec_reconciliation", out,
+                              ["class", "sleeve", "date", "ref", "exec_ids", "detail"]),
+                             ("exec_backfill", backfill,
+                              ["sleeve", "date", "action", "key", "order_ref", "exec_ids"])):
+        with open(tdir / f"{name}.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(recs)
+    warn = [f"two-way check incomplete: {s} ledger unavailable ({LEDGERS[s]})"
+            for s in missing_ledgers]
+    for cls in FAIL_CLASSES:
+        bad = [r for r in out if r["class"] == cls]
+        if bad:
+            r = bad[0]
+            warn.append(f"EXECUTIONS {cls}: {len(bad)} (e.g. {r['sleeve']} {r['ref']} "
+                        f"[{r['exec_ids']}] {r['detail']})")
+    return warn, counts
+
+
+# ---------------------------------------------------------------------------------------------
+# REALISED COMMISSION vs THE COST MODEL (2026-10-07). The options-vrp edge depends on its cost
+# guard's per-contract commission assumption (COMMISSION_PER_CONTRACT, $0.65/side). IB's own records
+# say what it really costs; tables/commission_by_sleeve.csv shows every sleeve's realised cost per
+# unit (share / contract), and options-vrp alerts when realised exceeds the assumption by more than
+# COST_WARN_RATIO over a meaningful sample.
+ASSUMED_COMMISSION = {"options-vrp": float(os.getenv("VRP_ASSUMED_COMMISSION", "0.65"))}
+COST_WARN_RATIO = 1.25
+COST_MIN_UNITS = 10
+
+
+def commission_check() -> list[str]:
+    p = RECORDS / "tables" / "trades.csv"
+    if not p.exists():
+        return []
+    with open(p, encoding="utf-8") as f:
+        rows = [r for r in csv.DictReader(f)
+                if r.get("strategy") and r.get("levelOfDetail", "EXECUTION") in ("EXECUTION", "")
+                and _iso8(r.get("tradeDate") or r.get("dateTime", "")) >= LINKED_FROM
+                and r.get("assetCategory") != "BAG"]
+    agg: dict[tuple, list[float]] = {}
+    for r in rows:
+        k = (r["strategy"], r.get("assetCategory", ""))
+        a = agg.setdefault(k, [0, 0.0, 0.0])
+        a[0] += 1
+        a[1] += abs(float(r.get("quantity") or 0))
+        a[2] += abs(float(r.get("ibCommission") or 0))
+    out, warn = [], []
+    for (sleeve, cat), (n, units, comm) in sorted(agg.items()):
+        per = comm / units if units else 0.0
+        assumed = ASSUMED_COMMISSION.get(sleeve) if cat == "OPT" else None
+        out.append({"sleeve": sleeve, "asset": cat, "executions": n, "units": units,
+                    "commission": round(comm, 2), "per_unit": round(per, 4),
+                    "assumed_per_unit": assumed if assumed is not None else "",
+                    "ratio": round(per / assumed, 3) if assumed else ""})
+        if assumed and units >= COST_MIN_UNITS and per > COST_WARN_RATIO * assumed:
+            warn.append(f"COST MODEL: {sleeve} pays ${per:.3f}/contract/side realised vs the guard's "
+                        f"${assumed:.2f} assumption ({per / assumed:.2f}x over {units:g} contracts) — "
+                        f"the cost guard is under-pricing trades")
+    tdir = RECORDS / "tables"
+    tdir.mkdir(parents=True, exist_ok=True)
+    with open(tdir / "commission_by_sleeve.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["sleeve", "asset", "executions", "units", "commission",
+                                          "per_unit", "assumed_per_unit", "ratio"])
+        w.writeheader()
+        w.writerows(out)
+    return warn
+
+
+# ---------------------------------------------------------------------------------------------
+# HEARTBEAT (2026-10-07). An email that only fires on failure cannot report a job that never
+# ran (machine off, wrong path, missing .bat). Two signals on every completed run:
+#   - a one-line success email (also on days with no activity), and
+#   - an optional GET to a dead-man's-switch URL from HEARTBEAT_URL (never stored in the repo).
+#     The ping carries NOTHING but the request itself -- no account, amounts or ids -- and fails
+#     quietly: it must never block or fail the download.
+def ping_heartbeat() -> bool:
+    url = os.getenv("HEARTBEAT_URL", "").strip()
+    if not url:
+        return False
+    try:
+        with urlopen(Request(url, headers=UA), timeout=10) as r:
+            r.read(64)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"heartbeat ping failed (ignored): {type(e).__name__}")
+        return False
 
 
 def alert(subject: str, body: str) -> None:
@@ -519,10 +1111,20 @@ def main() -> int:
     counts = rebuild_tables()
     log("tables: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"))
     warns = audit_checks(counts)
+    xwarn, xcounts = reconcile_executions()
+    warns += xwarn
+    warns += commission_check()
+    log("executions: " + (", ".join(f"{k} {v}" for k, v in sorted(xcounts.items())) or "none"))
     for w in warns:
         log(f"WARNING: {w}")
-    if warns and not args.rebuild:
+    if args.rebuild:
+        return 0
+    if warns:
         alert("[IB records] audit trail incomplete", "\n".join(warns))
+    else:
+        alert(f"[IB records] OK {datetime.now():%Y-%m-%d}: "
+              f"{xcounts.get('matched', 0)} execution(s) matched, no issues", "")
+    ping_heartbeat()
     return 0
 
 
