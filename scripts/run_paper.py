@@ -34,6 +34,7 @@ from risk_guard import (code_version, install_alert_collector,  # noqa: E402
                         missed_runs,
                         push_if_alerts, reconcile, halt_state,
                         HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
+                        documented_sizing, log_sizing,
                         data_fresh, RiskLimits, write_equity, book_drawdown, book_vol,
                         BreakerLevels, blended_vol)
 from paper.rank import todays_ranking  # noqa: E402
@@ -265,6 +266,22 @@ def _spy_returns(inception: str | None):
         return None, None, None
 
 
+def paper_config() -> PaperConfig:
+    """magic-formula's config, its budget read from config/capital_bases.json (the single source
+    for sizing budgets; owner's decision 2026-10-07).
+
+    HOW THIS SLEEVE READS THE SHARED CONFIG -- so it is not flattened into a fixed 50k:
+      * `budget` is the CAP on the deployment base. Sizing stays gap-to-NAV against
+        min(NAV, budget) (orchestrator._slot_usd): below budget the book sizes to its own equity
+        (it shrinks after losses), above it the base stops at budget (no compounding past it).
+      * `budget` seeds inception_nav ONLY on a fresh, empty book (ensure_inception).
+      * The RETURN base is the sleeve's own inception_nav from state.json; the config's `amount`
+        documents it and is never used for sizing."""
+    budget, src = documented_sizing(ROOT, "magic-formula")
+    log_sizing("magic-formula", budget, src)
+    return PaperConfig(budget=budget)
+
+
 def main(dry_run: bool = False, force: bool = False) -> None:
     today = datetime.now().strftime("%Y-%m-%d")
     if datetime.now().weekday() >= 5 and not force:
@@ -272,9 +289,9 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         return
 
     cfg_mf = EnhancedMagicConfig(use_graham=False)
-    # BUDGET from env so a checkout sizes to its own capital (paper 100k default, live 50k via
-    # .env) without a code edit — matching how options-vrp/trend-overlay already read it.
-    cfg = PaperConfig(budget=float(os.getenv("BUDGET", "100000")))
+    # BUDGET from config/capital_bases.json (an env BUDGET still overrides, loudly) -- see
+    # paper_config() for how this NAV-linked sleeve uses it.
+    cfg = paper_config()
     state = PortfolioState.load(STATE_FILE)
 
     # KILL SWITCH — FIRST, before the universe refresh. That pull takes ~13 minutes, so checking

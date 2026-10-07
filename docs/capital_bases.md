@@ -9,6 +9,33 @@ base**. The values live in `config/capital_bases.json` and are read by `scripts/
 | trend-overlay | **$75,000** | 2026-09-14 | Notional sizing budget: `BUDGET` 50,000 × `OVERLAY_MULT` 1.5. This is the exposure the sleeve is sized to, not cash set aside |
 | options-vrp | **$50,000** | 2026-10-04 | `BUDGET`: the risk base that sizes each spread (max loss ≤ 3% of it per position) |
 
+## How the runners read it — the single source for sizing
+
+Since 2026-10-07 every live runner takes its sizing input from this file through
+`risk_guard.documented_sizing` (the file is kept byte-identical in algo_trading, trend-overlay and
+options-vrp; each repo's `test_sizing_identity.py` checks its siblings' copies when they sit next
+to it):
+
+| Sleeve | Field read | How it is used |
+|---|---|---|
+| magic-formula | `budget` (50,000) | the **cap** on the deployment base: sizing is gap-to-NAV against `min(NAV, budget)`, so the book shrinks with its own equity after losses and never compounds past the budget; it also seeds `inception_nav` on a fresh, empty book. The return base stays the sleeve's own `inception_nav` — the sleeve is NOT flattened into a fixed 50k |
+| trend-overlay | `budget` (50,000) × `overlay_mult` (1.5) | the sizing base; also the circuit breaker's equity base (no second env read) |
+| options-vrp | `budget` (50,000) | the risk base: each spread's max loss ≤ 3% of it |
+
+- Every run logs one line with the budget **actually in use** and its source.
+- An env `BUDGET` / `OVERLAY_MULT` still overrides for a one-off. When it differs from the file it
+  is a WARNING (in the email), so a stray override cannot diverge silently.
+- A missing or unreadable file is an ERROR and falls back to the nominal allocation (the values
+  above) — never to zero, which for the trend overlay would mean closing everything.
+- The switch was verified **byte-identical**: the sizing output (config + real sizing on fixed
+  fixtures) of the old code with the live env equals the new code's from this file alone. The
+  fingerprint is kept in each repo's `scripts/fixtures/` and re-checked by `test_sizing_identity.py`.
+
+**`risk_guard.ALLOCATIONS` are guard CEILINGS** (maximum NAV fraction per sleeve, 1.00 each), not
+budgets, and no base is derived from them (1.00 × three sleeves would be 3 × NAV — the same overlap
+problem). The link between the two homes is a test: a sleeve's documented budget may not exceed
+its ceiling × NAV; `log_sizing` also warns at runtime if it does.
+
 ## What these are NOT
 
 They are **not allocations of the account**. All three sleeves share one account's collateral, so
@@ -60,3 +87,4 @@ restated: compare across a change only in dollars.
 | 2026-09-14 | trend-overlay | — → $75,000 | Live on real capital; `BUDGET` 50,000 × `OVERLAY_MULT` 1.5 |
 | 2026-10-04 | options-vrp | — → $50,000 | Live on real capital; `BUDGET` 50,000 |
 | 2026-10-07 | all | (unchanged) | Bases documented and moved from code defaults into `config/capital_bases.json`; owner accepted the NAV bridge (overlapping bases cannot be allocations) |
+| 2026-10-07 | all | (unchanged values) | The file becomes the single source for SIZING: `budget` (and trend's `overlay_mult`) added and read by the live runners; byte-identical sizing verified |
