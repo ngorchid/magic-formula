@@ -419,7 +419,13 @@ def build() -> tuple[str, str]:
     _asg = open_assignments(OPTIONS_STATE, today)
     asg_block = ("<div style='border:2px solid #b00;padding:8px;margin:8px 0'>"
                  "<b style='color:#b00'>OPEN ASSIGNMENTS (options-vrp) — stock delivered by an "
-                 "assigned put is still on</b><br>" + "<br>".join(_asg) + "</div>") if _asg else ""
+                 "assigned put is still on</b><br>" + "<br>".join(_asg) + "</div>") if _asg else (
+        # Explicit empty state: "none" only when the ledger was actually read; a missing ledger
+        # is UNKNOWN, never "none".
+        "<p style='margin:8px 0'>Open assignments (options-vrp): none</p>"
+        if Path(OPTIONS_STATE).exists() else
+        f"<p style='margin:8px 0;color:#b00'>Open assignments (options-vrp): UNKNOWN — ledger "
+        f"not found at {OPTIONS_STATE} (set OPTIONS_STATE)</p>")
     pv_line = asg_block + (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
                f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b><br>"
                f"<b>Account TWR:</b> {twr_str}</p>"

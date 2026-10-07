@@ -133,8 +133,14 @@ check("the email shows the block AND marks the subject '⚠ ASSIGNED'",
       str(_b2)[:200])
 bs.OPTIONS_STATE = empty                 # an IWM spread, not assigned
 _b3 = safe(bs.build)
-check("no open assignment -> no marker, no block",
-      isinstance(_b3, tuple) and not _b3[0].startswith("⚠") and "OPEN ASSIGNMENTS" not in _b3[1], str(_b3)[:120])
+check("no open assignment -> no marker, no red block, and an EXPLICIT 'none'",
+      isinstance(_b3, tuple) and not _b3[0].startswith("⚠") and "OPEN ASSIGNMENTS" not in _b3[1]
+      and "Open assignments (options-vrp): none" in _b3[1], str(_b3)[:120])
+bs.OPTIONS_STATE = tmp / "not-there.json"
+_b4 = safe(bs.build)
+check("options ledger missing -> 'UNKNOWN — ledger not found', never 'none'",
+      isinstance(_b4, tuple) and "Open assignments (options-vrp): UNKNOWN" in _b4[1]
+      and "Open assignments (options-vrp): none" not in _b4[1], str(_b4)[:120])
 
 print("\n" + "=" * 88)
 if _fails:
