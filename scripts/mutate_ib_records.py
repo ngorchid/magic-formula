@@ -102,7 +102,10 @@ def main() -> int:
     results = []
     with tempfile.TemporaryDirectory() as tmp:
         mutant = Path(tmp) / "download_ib_records.py"
-        env = dict(os.environ, IB_RECORDS_MODULE=str(mutant), PYTHONIOENCODING="utf-8")
+        # PYTHONDONTWRITEBYTECODE: a same-size mutant written within the same second could load a
+        # stale .pyc of the previous one (the cache is validated only by size + mtime).
+        env = dict(os.environ, IB_RECORDS_MODULE=str(mutant), PYTHONIOENCODING="utf-8",
+                   PYTHONDONTWRITEBYTECODE="1")
         for find, repl, why in MUTATIONS:
             if find not in original:
                 results.append((why, None))

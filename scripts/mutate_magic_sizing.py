@@ -16,9 +16,13 @@ Run: python3 scripts/mutate_magic_sizing.py
 from __future__ import annotations
 
 import pathlib
+import os
 import subprocess
 import sys
 
+# No bytecode cache in the suite runs: a .pyc is validated only by source size + mtime (1 s), so a
+# same-size mutant written within the same second as the last could run stale code (2026-10-07).
+_NOPYC = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TARGET = ROOT / "paper" / "orchestrator.py"
 SUITE = ["python3", "scripts/test_magic_sizing.py"]
@@ -155,7 +159,7 @@ def main() -> int:
             tgt.write_text(base.replace(find, repl, 1))
             for pyc in ROOT.rglob("*.pyc"):
                 pyc.unlink(missing_ok=True)
-            r = subprocess.run(SUITE, cwd=ROOT, capture_output=True, text=True)
+            r = subprocess.run(SUITE, cwd=ROOT, capture_output=True, text=True, env=_NOPYC)
             caught = r.returncode != 0
             results.append((why, caught))
             print(f"  [{'ok  ' if caught else 'FAIL'}] {why:70} "
@@ -181,7 +185,7 @@ def main() -> int:
     if missing:
         return 1
     # Restoring must leave the suite green, or the harness itself corrupted the file.
-    r = subprocess.run(SUITE, cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run(SUITE, cwd=ROOT, capture_output=True, text=True, env=_NOPYC)
     if r.returncode != 0:
         print("RESTORE FAILED — the suite does not pass on the original file")
         return 1
