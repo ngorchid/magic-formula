@@ -15,6 +15,17 @@ from email.mime.text import MIMEText
 from paper.state import PortfolioState
 
 
+
+def _code_line() -> str:
+    """The commit this run used (risk_guard.code_version), as the report's last line."""
+    try:
+        from risk_guard import code_version_note
+        note = code_version_note()
+    except Exception:  # noqa: BLE001 -- reporting must never break the run
+        note = ""
+    return (f"<p style='color:#64748b;font-size:11px'>Code: "
+            f"{note or 'version not recorded'}</p>")
+
 def _pct(x) -> str:
     return "—" if x is None else f"{x*100:+.2f}%"
 
@@ -101,6 +112,7 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
     <h3 style='color:#1a3c5e'>Portfolio</h3>
     {port_tbl}
     <p style='color:#64748b;font-size:11px;margin-top:14px'>US + Europe, ≥$500M, enhanced Magic Formula (Graham off, inverse-vol, 25% vol-target). {caveat}</p>
+    {_code_line()}
     </body></html>"""
 
 
