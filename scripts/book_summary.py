@@ -40,13 +40,17 @@ except Exception:  # noqa: BLE001
     pass
 
 # --- strategy sources: (label, state.json path, pnl-kind, %-base) --------------------------------
+# Return bases come from config/capital_bases.json, documented (with effective dates and a change
+# log) in docs/capital_bases.md. TREND_BASE / OPTIONS_BASE in the env still override for a one-off,
+# and the email then SAYS so -- an override is a config change and must be visible.
+CAPITAL_BASES = json.loads((ROOT / "config" / "capital_bases.json").read_text())
 MAGIC_STATE = ROOT / "results" / "paper" / "state.json"
 TREND_STATE = Path(os.getenv("TREND_STATE",
     r"C:\Users\Nicolas\PycharmProjects\trend-overlay-live\results\paper\state.json"))
-TREND_BASE = float(os.getenv("TREND_BASE", "75000"))   # 50k budget x 1.5 overlay = effective sizing
+TREND_BASE = float(os.getenv("TREND_BASE", CAPITAL_BASES["trend-overlay"]["amount"]))
 OPTIONS_STATE = Path(os.getenv("OPTIONS_STATE",
     r"C:\Users\Nicolas\PycharmProjects\options-vrp-live\results\paper\state.json"))
-OPTIONS_BASE = float(os.getenv("OPTIONS_BASE", "50000"))   # live BUDGET base (for % drawdown)
+OPTIONS_BASE = float(os.getenv("OPTIONS_BASE", CAPITAL_BASES["options-vrp"]["amount"]))
 
 # The book's inception CAPITAL — the account's funded size when magic-formula went live
 # (2026-08-17). Book P&L since inception is (live NetLiq - this), so NAV ties to
@@ -170,6 +174,83 @@ def _ib_margin() -> dict | None:
         return None
 
 
+# Above this share of NAV, the sleeve ledgers no longer explain the account: an unbooked fill, a
+# capital flow not reflected in BOOK_INCEPTION_CAPITAL, or marking drift grown large. PROVISIONAL
+# (2026-10-07): the normal size of FX financing + sweep commissions + yfinance-vs-IB marking is
+# not yet measured; revisit once a few weeks of the line exist.
+UNATTRIBUTED_WARN_FRAC = 0.01
+RECORDS_DIR = Path(os.getenv("IB_RECORDS_DIR", r"C:\Users\Nicolas\IB-records"))
+
+
+def ibkr_twr() -> tuple[float, str, str] | None:
+    """(time-weighted return, from, to) as IBKR reports it in the Flex ChangeInNAV section of the
+    most recent statement -- IBKR's own account-level TWR, the number for anything outside-facing.
+    None when the archive or the field is unavailable. NB the daily query's window is rolling
+    (7 days); an inception-to-date figure needs a second Flex query over that period."""
+    p = RECORDS_DIR / "tables" / "change_in_nav.csv"
+    if not p.exists():
+        return None
+    try:
+        import csv
+        with open(p, encoding="utf-8") as f:
+            rows = [r for r in csv.DictReader(f) if r.get("twr") not in (None, "")]
+        if not rows:
+            return None
+        r = max(rows, key=lambda x: (x.get("toDate", ""), -int(x.get("fromDate", "0") or 0)))
+        return float(r["twr"]), r.get("fromDate", ""), r.get("toDate", "")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def overlap_line(magic_path, options_path) -> str:
+    """Names held by BOTH magic-formula (stock) and options-vrp (a spread or delivered stock) --
+    the owner's choice (2026-10-07) is to allow the overlap and watch it, not block it."""
+    try:
+        mg = json.loads(Path(magic_path).read_text()) if Path(magic_path).exists() else {}
+        op = json.loads(Path(options_path).read_text()) if Path(options_path).exists() else {}
+    except Exception:  # noqa: BLE001
+        return "Names held by both sleeves: unknown (a sleeve state could not be read)"
+    import re
+    root = lambda t: re.sub(r"[^A-Z0-9]", "", t.upper().rsplit(".", 1)[0]  # noqa: E731
+                            if "." in t and len(t.rsplit(".", 1)[1]) <= 3 else t.upper())
+    held = {root(p["ticker"]): p for p in mg.get("positions", []) if p.get("ticker")}
+    both = []
+    for sp in op.get("open_spreads", []):
+        t = root(sp.get("ticker", ""))
+        if t in held:
+            tag = " ASSIGNED" if sp.get("assigned_contracts") else ""
+            both.append(f"{t} (magic {held[t].get('shares', 0):g} sh · VRP "
+                        f"{sp.get('short_strike', 0):g}/{sp.get('long_strike', 0):g}P "
+                        f"x{sp.get('contracts', 0)}{tag})")
+    return "Names held by both sleeves: " + (", ".join(sorted(both)) if both else "none")
+
+
+def reconciliation_lines(net_liq: float | None, sleeves: list[dict], inception: float,
+                         bases: dict[str, float]) -> tuple[str, float | None]:
+    """(html, unattributed). Two lines that make the sleeve figures tie VISIBLY to the account:
+
+    1. the return bases, labelled for what they are -- overlapping denominators on shared
+       collateral, NOT allocations (they sum to far more than the NAV, by design);
+    2. NAV = inception capital + each sleeve's OWN ledger P&L + the unattributed remainder. The
+       identity holds by definition, so the CHECK is the size of the remainder: above
+       UNATTRIBUTED_WARN_FRAC of NAV the ledgers no longer explain the account, and it says so."""
+    names = {"Magic Formula": "magic", "Trend Overlay": "trend", "Options VRP": "options"}
+    b = " · ".join(f"{k} ${v:,.0f}" for k, v in bases.items())
+    line1 = (f"Return bases (overlapping — shared collateral, not allocations; sum "
+             f"${sum(bases.values()):,.0f}): {b}")
+    if net_liq is None:
+        return f"<p style='color:#64748b;font-size:11px;margin:4px 0'>{line1}</p>", None
+    unattributed = net_liq - inception - sum(s["l_total"] for s in sleeves)
+    terms = " + ".join(f"{names.get(s['label'], s['label'])} {_money(s['l_total'])}" for s in sleeves)
+    big = abs(unattributed) > UNATTRIBUTED_WARN_FRAC * abs(net_liq)
+    line2 = (f"NAV ${net_liq:,.0f} = inception ${inception:,.0f} + {terms} + unattributed "
+             f"{_money(unattributed)}"
+             + (f" ⚠ over {UNATTRIBUTED_WARN_FRAC:.0%} of NAV — the sleeve ledgers do not explain "
+                f"the account (unbooked fill? capital flow?)" if big else ""))
+    return (f"<p style='color:#64748b;font-size:11px;margin:4px 0'>{line1}<br>{line2}</p>",
+            unattributed)
+
+
 def _money(x) -> str:
     return f"${x:+,.0f}" if x is not None else "—"
 
@@ -238,7 +319,8 @@ def build() -> tuple[str, str]:
 
     def _row(s, bold=False):
         b = "font-weight:700;border-top:2px solid #334155" if bold else ""
-        dd = f"{_money(s['mdd'])}" + (f" ({s['mdd'] / s['base']:.1%})" if s["base"] else "")
+        dd = f"{_money(s['mdd'])}" + (f" ({s['mdd'] / s['base']:.1%} of ${s['base']:,.0f})"
+                                      if s["base"] else "")
         dcol = "#1a7f37" if (s["daily"] or 0) >= 0 else "#b91c1c"
         tcol = "#1a7f37" if (s["total"] or 0) >= 0 else "#b91c1c"
         return (f"<tr style='{b}'><td style='padding:3px 16px 3px 0'>{s['label']}</td>"
@@ -265,6 +347,20 @@ def build() -> tuple[str, str]:
             recon_note += ("<p style='color:#64748b;font-size:11px;margin:4px 0'>Book daily shows &mdash; "
                            "until the NetLiq history spans two trading days (new; fills from the 21:00 run).</p>")
 
+    _bases = {"magic": next((s["base"] for s in sleeves if s["label"] == "Magic Formula"),
+                            CAPITAL_BASES["magic-formula"]["amount"]),
+              "trend": TREND_BASE, "options": OPTIONS_BASE}
+    recon_html, _unattr = reconciliation_lines(net_liq, sleeves, INCEPTION_CAPITAL, _bases)
+    _over = [f"{k} {v:,.0f} (documented {CAPITAL_BASES[cfg]['amount']:,.0f})"
+             for k, v, cfg in (("trend", TREND_BASE, "trend-overlay"),
+                               ("options", OPTIONS_BASE, "options-vrp"))
+             if abs(v - CAPITAL_BASES[cfg]["amount"]) > 0.5]
+    if _over:
+        recon_html += ("<p style='color:#b45309;font-size:11px;margin:4px 0'>⚠ return base "
+                       "OVERRIDDEN by env: " + "; ".join(_over) + " — log it in docs/capital_bases.md"
+                       "</p>")
+    recon_note += recon_html
+
     opt_margin = _options_margin(OPTIONS_STATE)   # options-vrp's own defined-risk collateral
     if m:
         nl, mm = m.get("NetLiquidation", 0.0), m.get("FullMaintMarginReq", 0.0)
@@ -286,8 +382,17 @@ def build() -> tuple[str, str]:
     # Headline: the total portfolio value (= account NetLiquidation). Shown up top in plain dollars
     # (unsigned — it's a value, not a P&L), with the same number repeated in the margin table below.
     pv_str = f"${net_liq:,.0f}" if net_liq is not None else "—"
+    _twr = ibkr_twr()
+    twr_str = (f"{_twr[0]:+.2f}% ({_twr[1]}–{_twr[2]}, IBKR)" if _twr
+               else "unavailable (no Flex ChangeInNAV TWR in the archive)")
     pv_line = (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
-               f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b></p>")
+               f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b><br>"
+               f"<b>Account TWR:</b> {twr_str}</p>"
+               f"<p style='color:#64748b;font-size:11px;margin:4px 0'>Sleeves are shown in dollars; "
+               f"any percentage is against the disclosed notional base in brackets "
+               f"(docs/capital_bases.md). Use the account TWR for anything outside-facing.</p>"
+               f"<p style='font-family:monospace;font-size:12px;margin:4px 0'>"
+               f"{overlap_line(MAGIC_STATE, OPTIONS_STATE)}</p>")
 
     body = f"""<html><body style='font-family:sans-serif;color:#1e293b'>
     <h2 style='color:#1a3c5e'>Live Book Summary — {today}</h2>
