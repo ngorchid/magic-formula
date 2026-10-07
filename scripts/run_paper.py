@@ -33,7 +33,7 @@ from paper.orchestrator import PaperConfig, run_daily  # noqa: E402
 from risk_guard import (code_version, install_alert_collector,  # noqa: E402
                         missed_runs,
                         push_if_alerts, reconcile, halt_state,
-                        HALT_ALL, HALT_NEW, circuit_breaker, peak_equity,
+                        HALT_ALL, HALT_HARD, HALT_NEW, circuit_breaker, peak_equity,
                         documented_sizing, log_sizing,
                         data_fresh, RiskLimits, write_equity, book_drawdown, book_vol,
                         BreakerLevels, blended_vol)
@@ -302,8 +302,9 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     # thing you want to learn from a halted day's log, not discover a month later.
     code_version(ROOT)
     _halt, _hwhy = halt_state(ROOT)
-    if _halt == HALT_ALL:
-        logging.error("HALTED (all): %s — exiting without trading", _hwhy)
+    # magic-formula has no SAFETY-flagged closes, so HALT_ALL and HALT_HARD both stop it entirely.
+    if _halt in (HALT_ALL, HALT_HARD):
+        logging.error("HALTED (%s): %s — exiting without trading", _halt, _hwhy)
         push_if_alerts(ALERTS, "Magic Formula")
         return
     if _halt == HALT_NEW:
