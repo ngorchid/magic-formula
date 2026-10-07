@@ -7,7 +7,7 @@ The first ad-hoc tests caught 10 of 19 such faults (2026-10-06); every one must 
 
 Unlike mutate_trend_sizing.py this never edits the real script: each mutant is written to a temp
 copy and the suite is pointed at it via IB_RECORDS_MODULE. An interrupted run therefore cannot
-leave a broken download_ib_records.py for the 08:30 IBRecordsDownload task.
+leave a broken download_ib_records.py for the IBRecordsDownload task (Tue–Sat 08:30).
 
 Non-zero exit if any fault survives or a pattern no longer matches (the code moved: update this).
 

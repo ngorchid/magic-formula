@@ -1,7 +1,7 @@
 # IB records archive — setup
 
 `scripts/download_ib_records.py` downloads IB's own records for the live account (U27760647)
-every day via the Flex Web Service and archives them unchanged. Together with the
+every Tuesday–Saturday morning via the Flex Web Service and archives them unchanged. Together with the
 `orderRef = "<strategy>:<run id>"` tag on every order (since 2026-10-06), this gives a full audit
 trail: every execution, fee and cash movement from IB, attributable to a strategy and to the run
 (and its `run.log` section) that placed it.
@@ -102,9 +102,12 @@ options-vrp reads `IB_RECORDS_DIR` (same default) to apply the execution-id back
 ## 4. Run / schedule
 
 `scripts\download_ib_records.bat` (logs to `logs\ib_records.log`); scheduled task
-`IBRecordsDownload` runs it daily. Activity statements cover the previous business day once IB's
-overnight processing is done, so the run is in the morning; codes 1005–1008 ("processing
-pending") are transient and the next run's 7-day window picks the data up anyway.
+`IBRecordsDownload` runs it **Tuesday–Saturday at 08:30** (owner's decision, 2026-10-07; catches
+up if the PC was off). Activity statements cover the previous business day once IB's overnight
+processing is done, so each run reports the day before: Tuesday's covers Monday, Saturday's covers
+Friday — every trading day is checked the next morning, and no run reports an empty weekend day.
+Nothing is lost on Sunday/Monday: each download's 7-day window overlaps the previous ones. Codes
+1005–1008 ("processing pending") are transient and the next run picks the data up anyway.
 
 ## Storage — `C:\Users\Nicolas\IB-records` (override with `IB_RECORDS_DIR`)
 
@@ -226,7 +229,8 @@ and never blocks the download. Not sent: on a failed download (so a dead-man's s
 `--rebuild`.
 
 Dead-man's switch setup (owner): pick the service (e.g. Healthchecks.io), set its expected schedule
-to the `IBRecordsDownload` task's (weekdays 08:30) plus a grace period, put the ping URL in the live
+to the `IBRecordsDownload` task's (Healthchecks cron `30 8 * * 2-6`, time zone Europe/Zurich =
+Tuesday–Saturday 08:30) plus a grace period of 1–2 h, put the ping URL in the live
 `.env` as `HEARTBEAT_URL` — never in the repo, since anyone holding it can fake a success — and test
 it once by skipping a run.
 
