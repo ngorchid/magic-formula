@@ -192,9 +192,14 @@ Notes:
   `ASSIGNED_LONG_SOLD` (the SAFETY unwind's fills, compared like any fill), and
   `ASSIGNED_CLOSED_OUTSIDE` (unwound by hand; not a fill — the hand-placed orders show as untagged,
   which is expected).
-- **Combos at leg level.** PROVISIONAL until verified on real VRP fills: the API returns a
-  combo-level execution id besides the legs', which Flex may not report, so ONE missing id on a
-  spread whose two legs both matched is treated as that combo-level id.
+- **Combos at leg level.** VERIFIED 2026-10-07 on the first three live spreads (IWM, XLE, NVDA,
+  opened 2026-10-06): Flex reports **only the legs** (`Trade`/`OPT`/`EXECUTION`, one per leg, each
+  with the tag and its commission) and never the API's combo-level execution id. That id shares the
+  legs' prefix and is sequence `.01`, the legs following as `.02`, `.03` (combo
+  `0002be7d.6ac5508e.01.01`, legs `.02.01` / `.03.01`). So ONE missing id on a spread whose legs
+  all matched is accepted only if it is exactly that `.01` sibling; anything else is reported. A
+  combo that partially fills into several executions has not been seen yet — it would show as
+  `ledger_not_in_flex` and be calibrated then.
 - **Backfill.** For a VRP tag-only row the real leg ids are written to `tables/exec_backfill.csv`;
   options-vrp applies them to its own ledger at the start of its next run, keeping the superseded
   state on the row. This job never writes a ledger.
@@ -216,9 +221,10 @@ the edge estimate, would be under-pricing trades.
 Run on the machine holding the archive: writes every options-vrp-tagged, option/combo or
 assignment-coded Trade / Order / OptionEAE row with only the agreed fields (ids, tag, conid, side,
 quantity, price, commission, timestamps, option fields, codes), the **account id masked everywhere**,
-and prints how each IB order appears (record / asset class / level of detail). Send the CSV back to
-calibrate the combo-level-id rule; expect the first nightly check to flag VRP rows — use the flags
-to calibrate, not to silence it.
+and prints how each IB order appears (record / asset class / level of detail). First run
+2026-10-07: 3 spreads -> 6 leg orders, each `Order/OPT/ORDER` + `Trade/OPT/EXECUTION`, no `BAG`
+rows; that calibrated (and verified) the combo-level-id rule above. Rerun it after the first
+partial combo fill or assignment. Exports are kept in `IB-records\calibration\`.
 
 ## Heartbeat (2026-10-07)
 

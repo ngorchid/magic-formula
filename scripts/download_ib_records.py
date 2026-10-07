@@ -635,9 +635,14 @@ def check_descriptions() -> list[str]:
 #
 # NOT compared, because no ledger records them: commission and conid. The contract is compared by
 # its description instead (symbol; future root + expiry; option underlying/expiry/strike/right).
-# Combos are compared at LEG level. PROVISIONAL until checked on real VRP fills: the API returns
-# a combo-level execution id besides the legs', which Flex may not report; one missing id on a
-# spread whose two legs both matched is therefore treated as that combo-level id.
+# Combos are compared at LEG level. VERIFIED 2026-10-07 on the first three live spreads (IWM, XLE,
+# NVDA, opened 2026-10-06): Flex reports ONLY the legs (Trade/OPT/EXECUTION, one per leg, each
+# with the tag and its commission) and never the API's combo-level execution id. That id shares
+# the legs' prefix and is sequence .01, the legs following as .02, .03: e.g. combo
+# 0002be7d.6ac5508e.01.01, legs .02.01 / .03.01. So ONE missing id on a spread whose legs all
+# matched is accepted as the combo-level id ONLY if it is exactly that sibling (_is_combo_level_id);
+# any other missing id is reported. A combo that partially fills into several executions has not
+# been seen yet -- it would surface as ledger_not_in_flex, to be calibrated then.
 LINKED_FROM = "20261006"          # first day orders carried a tag and ledgers kept exec ids
 AGEING_DAYS = 3                   # a ledger id still not covered by any statement after this
                                   # many business days alerts (IB lag is normally one day)
@@ -784,6 +789,21 @@ def _ledger_fills() -> tuple[list[dict], list[str]]:
     return fills, missing
 
 
+def _is_combo_level_id(missing: str, leg_ids: list[str]) -> bool:
+    """True if `missing` is the combo-level execution id of these legs: same prefix, sequence 01,
+    while every leg is a later sequence (verified 2026-10-07: combo 0002be7d.6ac5508e.01.01, legs
+    .02.01 / .03.01). Anything else -- another prefix, a leg sequence, an odd shape -- is a real
+    missing id."""
+    m = missing.split(".")
+    if len(m) < 3 or m[-2] != "01" or not leg_ids:
+        return False
+    for leg in leg_ids:
+        p = leg.split(".")
+        if len(p) != len(m) or p[:-2] != m[:-2] or p[-2] == "01":
+            return False
+    return True
+
+
 def _flex_key(e: dict) -> tuple:
     cat = e.get("assetCategory", "")
     if cat == "OPT":
@@ -918,8 +938,9 @@ def reconcile_executions() -> tuple[list[str], dict[str, int]]:
             used.update(i for i in fl["exec_ids"] if i in by_id)
             legs_found = {_flex_key(e) for e in found}
             if (absent and fl["kind"] == "OPT" and len(absent) == 1
-                    and legs_found == {leg["key"] for leg in fl["legs"]}):
-                absent = []                            # the combo-level id (PROVISIONAL rule)
+                    and legs_found == {leg["key"] for leg in fl["legs"]}
+                    and _is_combo_level_id(absent[0], [e["ibExecID"] for e in found])):
+                absent = []                            # the combo-level id (verified rule)
             if absent and not found:
                 if covered(fl["date"]):
                     emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], absent,

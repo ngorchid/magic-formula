@@ -1,10 +1,11 @@
 """Export SANITISED options-vrp fills from the IB Flex archive, to calibrate the two-way check.
 
-WHY (2026-10-07). The nightly check treats one missing execution id on a spread whose two legs
-both matched as the API's combo-level id -- PROVISIONAL, because how IB's Flex export shows a combo
-and its legs had not been seen on real fills. Run this on the machine that holds the archive and
-send the CSV back. Expect the first nightly check to flag VRP rows: those flags calibrate the
-rules, they are not to be silenced.
+WHY (2026-10-07). The nightly check accepts one missing execution id on a spread whose legs all
+matched as the API's combo-level id. That rule was PROVISIONAL until this export's first run
+(2026-10-07, three live spreads) showed how Flex reports a combo: only the legs, never the combo
+id, which is the legs' .01 sibling -- the rule is now verified and tightened to exactly that. Rerun
+this after the first partial combo fill or assignment, and keep the export in
+IB-records\\calibration\\. Flags from the nightly check calibrate the rules; never silence them.
 
 Kept, per row: the record type, ibExecID, ibOrderID, orderReference, conid (+ underlying conid),
 symbols, asset category, level of detail, side, quantity, price, commission (+ currency),

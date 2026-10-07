@@ -48,8 +48,9 @@ put("20261006", "20261008", "".join([
     trade("fx1", "EUR.USD", "12087792", M, "BUY", 1000, 1.1, cat="CASH"),
     trade("e3", "MCLZ6", "661016519", T, "BUY", 1, 88.48, cat="FUT", underlying="MCL",
           expiry="20261119"),
-    opt("e4s", V, "SELL", 2, 1.20, 263),
-    opt("e4l", V, "BUY", 2, 0.46, 256),
+    # IB's real id shape (verified 2026-10-07): combo .01.01 (never in Flex), legs .02.01 / .03.01
+    opt("0002aa.e4.02.01", V, "SELL", 2, 1.20, 263),
+    opt("0002aa.e4.03.01", V, "BUY", 2, 0.46, 256),
     trade("old", "XOM", "13977", "", "BUY", 5, 100.0, date="20260930"),   # before tagging
 ]), "2026-10-08T08:30:00")
 ledger("magic-formula", {
@@ -66,7 +67,8 @@ ledger("trend-overlay", {"trade_log": [
      "price": 112.0, "reason": "RESYNC ledger to broker (-1 -> 0)"}]})              # bookkeeping
 ledger("options-vrp", {"trade_log": [
     {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
-     "credit": 0.74, "order_ref": V, "exec_ids": ["bag4", "e4s", "e4l"]}]})
+     "credit": 0.74, "order_ref": V,
+     "exec_ids": ["0002aa.e4.01.01", "0002aa.e4.02.01", "0002aa.e4.03.01"]}]})
 warn, counts = run()
 check("a clean book raises NO warning", warn == [], str(warn))
 check("magic BUY matched by execution id", row("matched", "e1") != {}, str(table("exec_reconciliation")))
@@ -75,7 +77,7 @@ check("one fill of TWO executions matches on the volume-weighted price",
 check("trend future matched (root symbol + expiry vs Flex underlying + expiry)",
       row("matched", "e3") != {}, str(row("field_mismatch", "e3")))
 check("VRP spread matched at LEG level, net credit = sells - buys",
-      row("matched", "e4s") != {}, str(table("exec_reconciliation")))
+      row("matched", "0002aa.e4.02.01") != {}, str(table("exec_reconciliation")))
 check("an FX sweep is reported as unledgered BY DESIGN, not as a failure",
       row("fx_sweep_unledgered", "fx1") != {} and counts.get("flex_tagged_unbooked", 0) == 0,
       str(counts))
@@ -161,9 +163,9 @@ print("\nTAG-ONLY ROWS — VRP self-heal: linked, then backfilled by options-vrp
 fresh()
 # One run tags ALL its orders with the same tag: the XLE spread below was opened by the same run,
 # so linking on the tag alone (without contract + side) would grab its legs too.
-xle = (trade("x1", "XLE P90", "990", V, "SELL", 3, 1.10, cat="OPT", underlying="XLE",
+xle = (trade("0002bb.x.02.01", "XLE P90", "990", V, "SELL", 3, 1.10, cat="OPT", underlying="XLE",
              expiry="20261120", strike="90", right="P")
-       + trade("x2", "XLE P85", "985", V, "BUY", 3, 0.40, cat="OPT", underlying="XLE",
+       + trade("0002bb.x.03.01", "XLE P85", "985", V, "BUY", 3, 0.40, cat="OPT", underlying="XLE",
                expiry="20261120", strike="85", right="P"))
 put("20261006", "20261008", "".join([
     opt("h1", V, "BUY", 2, 0.30, 263), opt("h2", V, "SELL", 2, 0.10, 256), xle,
@@ -174,7 +176,8 @@ ledger("options-vrp", {"trade_log": [
     {"date": "2026-10-07", "action": "CLOSE", "key": "IWM_2026-11-20_263_256", "contracts": 2,
      "close_value": 0.20, "order_ref": V, "exec_ids": []},
     {"date": "2026-10-07", "action": "OPEN", "key": "XLE_2026-11-20_90_85", "contracts": 3,
-     "credit": 0.70, "order_ref": V, "exec_ids": ["xbag", "x1", "x2"]},
+     "credit": 0.70, "order_ref": V,
+     "exec_ids": ["0002bb.x.01.01", "0002bb.x.02.01", "0002bb.x.03.01"]},
     {"date": "2026-10-07", "action": "CLOSE", "key": "IWM_2026-11-20_250_245", "contracts": 1,
      "close_value": 0.20, "order_ref": "options-vrp:NOPE", "exec_ids": []}]})
 warn, counts = run()
@@ -189,21 +192,71 @@ check("...and its real execution ids are written for options-vrp to backfill",
 check("linked executions are NOT also reported as unbooked", counts.get("flex_tagged_unbooked", 0) == 0,
       str(counts))
 check("the same run tag on ANOTHER spread does not leak into the link (contract + side matter)",
-      row("matched", "x1") != {} and "x1" not in lk.get("exec_ids", ""), str(table("exec_reconciliation")))
+      row("matched", "0002bb.x.02.01") != {} and "0002bb.x" not in lk.get("exec_ids", ""),
+      str(table("exec_reconciliation")))
 check("a tag-only row with no matching Flex executions -> ledger_not_in_flex",
       row("ledger_not_in_flex", "250_245") != {}, str(table("exec_reconciliation")))
 
 # =============================================================================================
 print("\nCOMBO RULE IS NARROW — one missing id is tolerated only when BOTH legs matched")
 fresh()
-put("20261006", "20261008", opt("k1", V, "SELL", 2, 1.20, 263), "2026-10-08T08:30:00")
+# Only the SHORT leg is in Flex; the one missing id is a perfectly shaped .01 sibling. It must still
+# be reported: the combo id is accepted only once EVERY leg of the spread has matched.
+put("20261006", "20261008", opt("0002ff.k.02.01", V, "SELL", 2, 1.20, 263), "2026-10-08T08:30:00")
 empty_ledgers()
 ledger("options-vrp", {"trade_log": [
     {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
-     "credit": 0.74, "order_ref": V, "exec_ids": ["k1", "kgone"]}]})
+     "credit": 0.74, "order_ref": V, "exec_ids": ["0002ff.k.01.01", "0002ff.k.02.01"]}]})
 warn, counts = run()
-check("a spread with only ONE leg in Flex is a missing id, not 'the combo-level id'",
-      row("ledger_not_in_flex", "kgone") != {}, str(table("exec_reconciliation")))
+check("a spread with only ONE leg in Flex is a missing id, even when it is a perfect .01 sibling",
+      row("ledger_not_in_flex", "0002ff.k.01.01") != {}, str(table("exec_reconciliation")))
+
+print("\nCOMBO RULE IS EXACT — only the .01 sibling of the matched legs counts as the combo id")
+
+
+def spread_case(missing: str) -> dict:
+    """Both legs of an IWM spread in Flex (real id shape), plus one ledger id absent from Flex."""
+    fresh()
+    put("20261006", "20261008", opt("0002cc.k.02.01", V, "SELL", 2, 1.20, 263)
+        + opt("0002cc.k.03.01", V, "BUY", 2, 0.46, 256), "2026-10-08T08:30:00")
+    empty_ledgers()
+    ledger("options-vrp", {"trade_log": [
+        {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
+         "credit": 0.74, "order_ref": V,
+         "exec_ids": [missing, "0002cc.k.02.01", "0002cc.k.03.01"]}]})
+    run()
+    return row("ledger_not_in_flex", missing)
+
+
+check("the .01 sibling of both legs is accepted as the combo-level id",
+      spread_case("0002cc.k.01.01") == {}, str(table("exec_reconciliation")))
+check("a missing id with ANOTHER prefix is reported, legs matched or not",
+      spread_case("0002dd.k.01.01") != {}, str(table("exec_reconciliation")))
+check("a missing id with the legs' prefix but a LEG sequence (.04) is reported",
+      spread_case("0002cc.k.04.01") != {}, str(table("exec_reconciliation")))
+check("a missing id of another shape is reported", spread_case("combo-1") != {},
+      str(table("exec_reconciliation")))
+
+print("\nREGRESSION — the first three live spreads (2026-10-06), real ids")
+fresh()
+real = [("IWM", "261120", "263", "256", 2, 2.10, 1.36, "0002be7d.6ac5508e"),
+        ("XLE", "261120", "59", "57", 8, 0.56, 0.30, "0002be7e.6ac55354"),
+        ("NVDA", "261113", "220", "210", 1, 2.46, 1.31, "0002be7d.6ac55096")]
+flex, log = "", []
+for und, exp, ks, kl, n, ps, pl, pre in real:
+    for seq, k, side, px in (("02", ks, "SELL", ps), ("03", kl, "BUY", pl)):
+        flex += trade(f"{pre}.{seq}.01", f"{und} {exp}P{k}", f"{und}{k}", V, side, n, px, cat="OPT",
+                      date="20261006", underlying=und, expiry=f"20{exp}", strike=k, right="P")
+    log.append({"date": "2026-10-06", "action": "OPEN", "contracts": n,
+                "key": f"{und}_20{exp[:2]}-{exp[2:4]}-{exp[4:]}_{ks}_{kl}",
+                "credit": round(ps - pl, 2), "order_ref": V,
+                "exec_ids": [f"{pre}.01.01", f"{pre}.02.01", f"{pre}.03.01"]})
+put("20260930", "20261006", flex, "2026-10-07T08:30:00")
+empty_ledgers()
+ledger("options-vrp", {"trade_log": log})
+warn, counts = run()
+check("all three live spreads match with their combo-level ids accepted, no warning",
+      counts.get("matched", 0) == 3 and warn == [], f"{counts} {warn}")
 
 print("\nSPELLINGS AND OLDER ROW SHAPES")
 fresh()
@@ -296,8 +349,8 @@ put("20261006", "20261008", "".join([
     trade("c2", "AAPL", "265598", M, "BUY", 5, 200.0, comm="-1.00"),
     trade("c3", "MSFT", "272093", M, "BUY", 5, 300.0, comm="-1.00"),
     trade("c4", "SAP", "1234", M, "BUY", 5, 100.0, comm="-1.00", ccy="EUR"),
-    opt("v1", V, "SELL", 2, 1.20, 263).replace('conid="9263"', 'conid="7001"').replace('ibCommission="-1"', 'ibCommission="-1.30"'),
-    opt("v2", V, "BUY", 2, 0.46, 256).replace('conid="9256"', 'conid="7002"').replace('ibCommission="-1"', 'ibCommission="-1.30"'),
+    opt("0002ee.v.02.01", V, "SELL", 2, 1.20, 263).replace('conid="9263"', 'conid="7001"').replace('ibCommission="-1"', 'ibCommission="-1.30"'),
+    opt("0002ee.v.03.01", V, "BUY", 2, 0.46, 256).replace('conid="9256"', 'conid="7002"').replace('ibCommission="-1"', 'ibCommission="-1.30"'),
 ]), "2026-10-08T08:30:00")
 empty_ledgers()
 ledger("magic-formula", {"positions": [
@@ -312,7 +365,8 @@ ledger("magic-formula", {"positions": [
     "trade_log": []})
 ledger("options-vrp", {"trade_log": [
     {"date": "2026-10-07", "action": "OPEN", "key": "IWM_2026-11-20_263_256", "contracts": 2,
-     "credit": 0.74, "order_ref": V, "exec_ids": ["bagv", "v1", "v2"], "conids": [7001, 7002],
+     "credit": 0.74, "order_ref": V,
+     "exec_ids": ["0002ee.v.01.01", "0002ee.v.02.01", "0002ee.v.03.01"], "conids": [7001, 7002],
      "commission": 2.60, "currency": "USD"}]})
 warn, counts = run()
 check("a recorded conid replaces the spelling match (ledger ABC.DE, IB XYZ, same conid)",
@@ -324,7 +378,7 @@ check("a conid difference is reported", "contract" in row("field_mismatch", "c3"
 check("a currency difference is reported", "currency" in row("field_mismatch", "c4").get("detail", ""),
       str(row("field_mismatch", "c4")))
 check("a VRP spread with leg conids + commission matches (2 x 1.30 = 2.60)",
-      row("matched", "v1") != {}, str(table("exec_reconciliation")))
+      row("matched", "0002ee.v.02.01") != {}, str(table("exec_reconciliation")))
 
 print("\nINCOMPLETE INPUT")
 fresh()
