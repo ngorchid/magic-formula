@@ -241,7 +241,7 @@ SOF_CODE_CATEGORY = {
     "WHT": "withholding_tax", "OFEE": "fee", "FEE": "fee", "DEP": "capital", "WITH": "capital",
     "CA": "corporate_action", "TTAX": "transaction_tax", "SLINC": "securities_lending",
     # STAX = sales tax / VAT that IB charges ON a fee (e.g. on the market-data subscription,
-    # first seen 2026-10-08). It follows the fee it is charged on -- see attribute().
+    # first seen 2026-10-07). It follows the fee it is charged on -- see attribute().
     "STAX": "sales_tax",
 }
 

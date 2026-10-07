@@ -171,7 +171,7 @@ inner = "".join([
     sof(31, "ADJ", "-0.004", "FX Translations P&L"),
     sof(32, "ADJ", "5", "STOCK ADJUSTMENT", conid="265598", cat="STK"),
     sof(33, "DINT", "-0.58", "EUR Debit Interest for Sep-2026"),   # base row: currency says USD
-    # VAT on fees (code STAX, seen live 2026-10-08): follows the fee it is charged on
+    # VAT on fees (code STAX, seen live 2026-10-07): follows the fee it is charged on
     sof(34, "STAX", "-0.38", "VAT n******05:US Equity and Options Add-On Streaming Bundle Non-Professional"),
     sof(35, "STAX", "-0.21", "VAT n******05:ACTIVITY FEE"),
 ])
