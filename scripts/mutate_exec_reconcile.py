@@ -12,6 +12,16 @@ import sys
 from _mutate_records_core import run
 
 MUTATIONS = [
+    ('                if fl["sleeve"] == "options-vrp" and fl.get("action"):',
+     '                if fl["sleeve"] == "options-vrp":', 'backfill rows written for append-only hand bookings'),
+    ('                if act == "HAND_UNWIND" and t.get("key"):', '                if False:',
+     'hand-unwind bookings are ignored (their hand trades alert forever)'),
+    ('                          ("OPT", tk.upper(), _iso8(exp), float(ks if leg == "short" else kl), "P"))',
+     '                          ("OPT", tk.upper(), _iso8(exp), float(ks), "P"))',
+     'a hand-booked long put is looked up at the short strike'),
+    ('                                            "qty": abs(float(t.get("qty") or 0))}],\n                                  "conids": _conids(t), "commission": t.get("commission"),\n                                  "currency": t.get("currency"),\n                                  "ref": f"{t[\'key\']} HAND_UNWIND',
+     '                                            "qty": 200.0}],\n                                  "conids": _conids(t), "commission": t.get("commission"),\n                                  "currency": t.get("currency"),\n                                  "ref": f"{t[\'key\']} HAND_UNWIND',
+     "a hand booking's quantity is not compared"),
     ('covered = lambda d: any(a <= d <= b for a, b in cover)',
      'covered = lambda d: True',
      'coverage ignored: not-yet-covered ids reported as missing'),
@@ -75,7 +85,7 @@ MUTATIONS = [
     ('                used.update(ids)\n',
      '',
      'tag-linked executions also reported as unbooked'),
-    ('                if fl["sleeve"] == "options-vrp":\n',
+    ('                if fl["sleeve"] == "options-vrp" and fl.get("action"):\n',
      '                if False:\n',
      'VRP backfill file never written'),
     ('and any(_flex_key(e) == leg["key"] and _side(e) == leg["side"]\n                            for leg in fl["legs"])]',

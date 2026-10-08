@@ -766,6 +766,27 @@ def _ledger_fills() -> tuple[list[dict], list[str]]:
                                   "currency": t.get("currency"),
                                   "ref": f"{t['key']} {act} {t.get('date')}"})
                     continue
+                if act == "HAND_UNWIND" and t.get("key"):
+                    # A hand unwind booked with scripts/book_hand_unwind.py (options-vrp, 2026-10-08):
+                    # compared like any fill, so it reconciles on its exec ids -- or alerts if the
+                    # booked facts differ from IB's. Without ids it matches nothing (as intended).
+                    try:
+                        tk, exp, ks, kl = t["key"].rsplit("_", 3)
+                    except ValueError:
+                        continue
+                    leg = t.get("leg")
+                    lk = (("STK", tk.upper()) if leg == "stock" else
+                          ("OPT", tk.upper(), _iso8(exp), float(ks if leg == "short" else kl), "P"))
+                    fills.append({"sleeve": sleeve, "date": _iso8(t.get("date")),
+                                  "order_ref": t.get("order_ref", ""),
+                                  "exec_ids": list(t.get("exec_ids") or []), "kind": "LEG",
+                                  "price": t.get("price"),
+                                  "legs": [{"key": lk, "side": (t.get("side") or "").upper(),
+                                            "qty": abs(float(t.get("qty") or 0))}],
+                                  "conids": _conids(t), "commission": t.get("commission"),
+                                  "currency": t.get("currency"),
+                                  "ref": f"{t['key']} HAND_UNWIND {leg} {t.get('date')}"})
+                    continue
                 if act not in ("OPEN", "CLOSE") or not t.get("key"):
                     continue
                 try:
@@ -978,7 +999,9 @@ def reconcile_executions() -> tuple[list[str], dict[str, int]]:
                 used.update(ids)
                 emit("linked_by_tag_only", fl["sleeve"], fl["date"], fl["ref"], ids,
                      "ledger has the tag but no execution ids")
-                if fl["sleeve"] == "options-vrp":
+                if fl["sleeve"] == "options-vrp" and fl.get("action"):
+                    # Only rows options-vrp can update (OPEN / CLOSE, matched on date, action, key,
+                    # tag). A HAND_UNWIND row is append-only: its ids come from the booking tool.
                     backfill.append({"sleeve": fl["sleeve"], "date": fl["date"],
                                      "action": fl.get("action", ""), "key": fl.get("key", ""),
                                      "order_ref": fl["order_ref"], "exec_ids": ";".join(ids)})

@@ -476,6 +476,54 @@ check("a currency difference is reported", "currency" in row("field_mismatch", "
 check("a VRP spread with leg conids + commission matches (2 x 1.30 = 2.60)",
       row("matched", "0002ee.v.02.01") != {}, str(table("exec_reconciliation")))
 
+print("\nHAND UNWIND — booked with options-vrp's book_hand_unwind.py, reconciled on its exec ids")
+HAND = "options-vrp:manual-20261009"
+hand_flex = (trade("h.s.01", "IWM", "9001", HAND, "SELL", 200, 254.10, date="20261009")
+             + opt("h.p.01", HAND, "SELL", 2, 3.45, 256, date="20261009"))
+
+
+def hand_rows(stock_qty=200.0, ids=("h.s.01", "h.p.01")):
+    r = [{"date": "2026-10-09", "action": "HAND_UNWIND", "key": "IWM_2026-11-20_263_256", "leg": "stock",
+          "side": "SELL", "qty": stock_qty, "price": 254.10, "exec_ids": [ids[0]] if ids[0] else [],
+          "order_ref": HAND},
+         {"date": "2026-10-09", "action": "HAND_UNWIND", "key": "IWM_2026-11-20_263_256", "leg": "long",
+          "side": "SELL", "qty": 2.0, "price": 3.45, "exec_ids": [ids[1]] if ids[1] else [],
+          "order_ref": HAND}]
+    return r
+
+
+fresh()
+put("20261006", "20261010", hand_flex, "2026-10-10T08:30:00")
+empty_ledgers()
+ledger("options-vrp", {"trade_log": hand_rows()})
+warn, counts = run()
+check("hand-booked shares and long puts with IB's exec ids -> both matched, no warning",
+      counts == {"matched": 2} and warn == [], f"{counts} {warn}")
+fresh()
+put("20261006", "20261010", hand_flex, "2026-10-10T08:30:00")
+empty_ledgers()
+ledger("options-vrp", {"trade_log": hand_rows(stock_qty=150.0)})
+run()
+check("a hand booking whose quantity differs from IB's -> field_mismatch (never silently accepted)",
+      row("field_mismatch", "h.s.01") != {}, str(table("exec_reconciliation")))
+fresh()
+put("20261006", "20261010", hand_flex, "2026-10-10T08:30:00")
+empty_ledgers()
+ledger("options-vrp", {"trade_log": hand_rows(ids=("", ""))})
+warn, counts = run()
+check("a hand booking without ids but with the manual Order Ref links by tag (contract, side, qty "
+      "all agree) -> no alert", counts == {"linked_by_tag_only": 2} and warn == [], f"{counts} {warn}")
+check("...and writes NO exec-id backfill for it (a HAND_UNWIND row is append-only)",
+      table("exec_backfill") == [], str(table("exec_backfill")))
+fresh()
+put("20261006", "20261010", hand_flex, "2026-10-10T08:30:00")
+empty_ledgers()
+ledger("options-vrp", {"trade_log": [dict(r, order_ref="") for r in hand_rows(ids=("", ""))]})
+run()
+check("a hand booking with neither ids nor tag matches nothing: IB's hand trades still alert",
+      row("flex_tagged_unbooked", "h.s.01") != {} and row("flex_tagged_unbooked", "h.p.01") != {},
+      str(table("exec_reconciliation")))
+
 print("\nINCOMPLETE INPUT")
 fresh()
 put("20261006", "20261008", trade("z1", "MCLZ6", "661016519", T, "BUY", 1, 88.0, cat="FUT",
