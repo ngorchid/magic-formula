@@ -15,8 +15,20 @@ F = "scripts/backup_to_onedrive.py"
 MUTATIONS = [
     # --- current/: additive copy ---
     (F, 'EXCLUDE_NAMES = {"panels.pkl"}', 'EXCLUDE_NAMES = set()', 'the price cache is backed up'),
-    (F, '        if p.is_file() and p.name not in EXCLUDE_NAMES:', '        if p.is_file():',
-     'exclusions ignored when walking a folder'),
+    (F, '        if p.is_file() and p.name not in EXCLUDE_NAMES and not is_env_file(p.name):',
+     '        if p.is_file() and not is_env_file(p.name):', 'the cache exclusion ignored when walking a folder'),
+    # --- .env copies never in plain text (restore drill finding, 2026-10-08) ---
+    (F, '        if p.is_file() and p.name not in EXCLUDE_NAMES and not is_env_file(p.name):',
+     '        if p.is_file() and p.name not in EXCLUDE_NAMES:', '.env copies in a folder are backed up in plain text'),
+    (F, '        if not is_env_file(src.name):\n            yield src, Path(src.name)',
+     '        if True:\n            yield src, Path(src.name)', 'a .env FILE source is backed up in plain text'),
+    (F, '    return n.startswith(".env") or n.endswith(".env")', '    return n == ".env"',
+     'only an exact .env is caught, not .env.bak-* copies'),
+    (F, '    return n.startswith(".env") or n.endswith(".env")', '    return n.startswith(".env")',
+     '*.env files are backed up in plain text'),
+    (F, '    n = name.lower()', '    n = name', 'an upper-case .ENV slips through'),
+    (F, '    return n.startswith(".env") or n.endswith(".env")', '    return "env" in n',
+     'any file with "env" in its name is dropped from the backup'),
     (F, '                    if ds.st_size == st.st_size and int(ds.st_mtime) == int(st.st_mtime):\n                        continue',
      '                    if ds.st_size == st.st_size:\n                        continue', 'a changed file of the same size is not updated'),
     (F, '                    if ds.st_size == st.st_size and int(ds.st_mtime) == int(st.st_mtime):\n                        continue',

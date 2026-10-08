@@ -57,6 +57,14 @@ PASSWORD_FILE = Path(os.getenv("BACKUP_PASSWORD_FILE", str(Path(os.getenv("LOCAL
 KEEP_DAYS = 365
 EXCLUDE_NAMES = {"panels.pkl"}                 # self-rebuilding cache, not state
 
+
+def is_env_file(name: str) -> bool:
+    """A .env file or any copy of one (.env.bak-..., live.env): credentials, so it may reach
+    OneDrive ONLY inside the encrypted env/ archive -- never in current/ or a daily zip. Found by
+    the 2026-10-08 restore drill: two .env.bak copies in results/ had been backed up in plain text."""
+    n = name.lower()
+    return n.startswith(".env") or n.endswith(".env")
+
 # (name in the backup, path). A directory is copied recursively; a file is copied as is.
 SOURCES = [
     ("magic-formula-live/results", PROJECTS / "magic-formula-live" / "results"),
@@ -79,10 +87,11 @@ def log(msg: str) -> None:
 def _files(src: Path):
     """(path, relative path) of every file to back up under `src` (a file or a directory)."""
     if src.is_file():
-        yield src, Path(src.name)
+        if not is_env_file(src.name):
+            yield src, Path(src.name)
         return
     for p in sorted(src.rglob("*")):
-        if p.is_file() and p.name not in EXCLUDE_NAMES:
+        if p.is_file() and p.name not in EXCLUDE_NAMES and not is_env_file(p.name):
             yield p, p.relative_to(src)
 
 

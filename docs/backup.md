@@ -15,7 +15,19 @@ encrypted archive). Script: `scripts/backup_to_onedrive.py`; task `TradingBackup
 | `C:\Users\Nicolas\IB-records` | the as-reported IB audit trail (raw XML + manifest) |
 | the four live `.env` files | credentials — **encrypted** (below) |
 
-Not backed up: the code (it is in Bitbucket), caches, the retired paper checkouts.
+Not backed up: the code (it is in Bitbucket), caches, the retired paper checkouts. **Never in plain
+text:** any `.env` file or copy of one (`.env.bak-…`, `*.env`) found inside a backed-up folder is
+skipped — credentials reach OneDrive only through the encrypted `env\` archive. (Restore drill
+2026-10-08 found two `.env.bak` copies in `results\` that had been copied in plain text; they were
+purged from `current\` and the 2026-10-07 zips, and the rule above added with tests.)
+
+## Restore drill (2026-10-08)
+
+The latest daily zip was restored into an empty folder and the records were rebuilt with the code
+from a clean `live` clone and **no `.env`** (no download, email or heartbeat possible). Result: all
+24 IB-records tables byte-identical to production, NAV bridge identical for every statement, ledger
+fills identical (magic 30, trend 12, options-vrp 3; 11 exec ids), execution check identical.
+Repeat it after any change to what is backed up.
 
 ## Where — `%OneDrive%\TradingBackup`
 

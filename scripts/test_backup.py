@@ -41,6 +41,14 @@ for repo in ("magic-formula-live", "trend-overlay-live", "options-vrp-live", "su
     w(PROJ / repo / ".env", f"SECRET_{repo.split('-')[0].upper()}=s3cr3t-{repo}\n")
 w(PROJ / "magic-formula-live" / "results" / "paper" / "panels.pkl", "x" * 1000)     # cache: excluded
 w(PROJ / "magic-formula-live" / "logs" / "run.log", "log line\n")
+# Copies of a .env lying in a results folder (the 2026-10-08 finding): credentials, must never be
+# copied in plain text. A file that merely CONTAINS "env" in its name is ordinary state.
+ENV_COPIES = ["magic-formula-live/results/.env.bak-statepaths-20261007",
+              "options-vrp-live/results/paper/.ENV", "trend-overlay-live/results/live.env"]
+for rel in ENV_COPIES:
+    w(PROJ / rel, "FLEX_TOKEN=plain-text-secret\n")
+w(PROJ / "options-vrp-live" / "results" / "paper" / "environment.json", '{"ok": 1}')
+w(PROJ / "trend-overlay-live" / "results" / "env_notes.envelope", "ok")
 w(PROJ / "substitute-pairs" / "book_equity.json", '{"pairs": 1}')
 w(PROJ / "book_equity.json", '{"book": 1}')
 w(IBR / "raw" / "2026" / "flex.xml", "<FlexQueryResponse/>")
@@ -90,6 +98,13 @@ check("every source lands in current/ under its name",
       and (CUR / "substitute-pairs/book_equity.json").exists(), str(list(CUR.rglob("*"))))
 check("the price cache (panels.pkl) is NOT copied",
       not (CUR / "magic-formula-live/results/paper/panels.pkl").exists(), "")
+check("NO .env copy (.env.bak-*, .ENV, *.env) is copied in plain text",
+      not any((CUR / rel).exists() for rel in ENV_COPIES)
+      and not any("plain-text-secret" in p.read_text(errors="ignore") for p in CUR.rglob("*") if p.is_file()),
+      str([rel for rel in ENV_COPIES if (CUR / rel).exists()]))
+check("...but files that only contain 'env' in their name ARE copied",
+      (CUR / "options-vrp-live/results/paper/environment.json").exists()
+      and (CUR / "trend-overlay-live/results/env_notes.envelope").exists(), "")
 check("no problems on a complete source tree", probs == [], str(probs))
 check("a second run copies nothing unchanged", b.copy_current([]) == 0, "")
 src_state = PROJ / "trend-overlay-live" / "results" / "paper" / "state.json"
@@ -118,6 +133,14 @@ check("contains every source under its backup name",
       "magic-formula-live/results/paper/state.json" in names and "IB-records/raw/2026/flex.xml" in names
       and "book_equity.json" in names and "substitute-pairs/book_equity.json" in names, str(names))
 check("the price cache is NOT in the snapshot", not any("panels.pkl" in x for x in names), str(names))
+check("NO .env copy is in the snapshot, in plain text or otherwise",
+      z is not None and not any(x in names for x in ENV_COPIES)
+      and not any(b"plain-text-secret" in zipfile.ZipFile(z).read(x) for x in names), str(names))
+check("...but environment.json IS in the snapshot",
+      "options-vrp-live/results/paper/environment.json" in names, str(names))
+check("a FILE source that is a .env copy is skipped too",
+      list(b._files(PROJ / "magic-formula-live" / "results" / ".env.bak-statepaths-20261007")) == []
+      and len(list(b._files(PROJ / "book_equity.json"))) == 1, "")
 check("the snapshot passes its CRC test", z is not None and zipfile.ZipFile(z).testzip() is None, "")
 check("no half-written .partial file is left", not list((DEST / "daily").glob("*.partial")), "")
 z2 = b.daily_zip(TODAY, [])
