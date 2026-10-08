@@ -12,6 +12,12 @@ import sys
 from _mutate_repo_core import run
 
 MUTATIONS = [
+    ('scripts/book_summary.py', '        sold = float(sp.get("assigned_shares_sold") or 0.0)\n',
+     '        sold = 0.0\n', 'a partly sold unwind shows all the shares as still held'),
+    ('scripts/book_summary.py', '        if sp.get("unwind_order"):\n            how +=',
+     '        if False:\n            how +=', 'a working unwind order is not shown'),
+    ('scripts/book_summary.py', '        if ns and not n:\n            # Decision #17',
+     '        if False:\n            # Decision #17', 'a SUSPECTED assignment is not listed'),
     ('scripts/book_summary.py',
      '        if t in held:\n',
      '        if t not in held:\n',
@@ -49,9 +55,13 @@ MUTATIONS = [
      '               f"</p>")',
      'the overlap line is missing from the email'),
     ('scripts/book_summary.py',
-     '        sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")',
-     '        sev = "OPEN"',
+     '        sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")\n        sold =',
+     '        sev = "OPEN"\n        sold =',
      'open assignments never escalate'),
+    ('scripts/book_summary.py',
+     '            sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")\n            out.append(f"SUSPECTED',
+     '            sev = "OPEN"\n            out.append(f"SUSPECTED',
+     'suspected assignments never escalate'),
     ('scripts/book_summary.py',
      '        how = "automatic unwind retrying" if sp.get("assigned_auto") else "MANUAL unwind needed"',
      '        how = "automatic unwind retrying"',

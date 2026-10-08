@@ -220,14 +220,30 @@ def open_assignments(options_path, today: str) -> list[str]:
     out = []
     for sp in st.get("open_spreads", []):
         n = int(sp.get("assigned_contracts") or 0)
+        ns = int(sp.get("assign_suspected") or 0)
+        if ns and not n:
+            # Decision #17 (2026-10-08): short leg gone without the shares -- not managed, not
+            # valued by the sleeve, so it must be visible here every day.
+            since = sp.get("assign_suspected_date") or today
+            days = int(np.busday_count(since, today)) + 1 if since <= today else 1
+            sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")
+            out.append(f"SUSPECTED {sev} day {days}: {sp.get('ticker')} {sp.get('short_strike', 0):g}/"
+                       f"{sp.get('long_strike', 0):g}P x{ns} — short leg gone, shares not visible; "
+                       f"not managed or valued; manual review")
+            continue
         if not n:
             continue
         since = sp.get("assigned_date") or today
         days = int(np.busday_count(since, today)) + 1 if since <= today else 1
         sev = "URGENT" if days >= 3 else ("ESCALATION" if days == 2 else "OPEN")
+        sold = float(sp.get("assigned_shares_sold") or 0.0)
         what = ("shares sold, long puts still open" if sp.get("assigned_stock_sold")
+                else f"{100 * n - sold:g} of {100 * n:g} {sp.get('ticker')} shares + {n} long "
+                     f"{sp.get('long_strike', 0):g}P open" if sold
                 else f"{100 * n:g} {sp.get('ticker')} shares + {n} long {sp.get('long_strike', 0):g}P open")
         how = "automatic unwind retrying" if sp.get("assigned_auto") else "MANUAL unwind needed"
+        if sp.get("unwind_order"):
+            how += f"; unwind order working at IB (permId {sp['unwind_order'].get('permId')})"
         out.append(f"{sev} day {days}: {sp.get('ticker')} {sp.get('short_strike', 0):g}/"
                    f"{sp.get('long_strike', 0):g}P x{n} assigned {since} — {what}; {how}")
     return out

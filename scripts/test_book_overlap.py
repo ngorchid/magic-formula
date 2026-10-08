@@ -116,6 +116,23 @@ asg.write_text(json.dumps({"open_spreads": [
     {"ticker": "IWM", "short_strike": 263, "long_strike": 256, "contracts": 2}]}))
 lines = safe(bs.open_assignments, asg, TODAY)
 ok = isinstance(lines, list) and len(lines) == 3
+sus = tmp / "sus.json"
+sus.write_text(json.dumps({"open_spreads": [
+    {"ticker": "XLE", "short_strike": 59, "long_strike": 57, "contracts": 8, "assign_suspected": 1,
+     "assign_suspected_date": d(2)}]}))
+part = tmp / "part.json"
+part.write_text(json.dumps({"open_spreads": [
+    {"ticker": "IWM", "short_strike": 263, "long_strike": 256, "contracts": 2, "assigned_contracts": 2,
+     "assigned_date": TODAY, "assigned_auto": True, "assigned_shares_sold": 120.0,
+     "unwind_order": {"leg": "stock", "permId": 77}}]}))
+pl = safe(bs.open_assignments, part, TODAY)
+check("a partly sold unwind shows the shares left and the working order (decision #15)",
+      isinstance(pl, list) and len(pl) == 1 and "80 of 200 IWM shares" in pl[0]
+      and "unwind order working at IB (permId 77)" in pl[0], str(pl))
+sl = safe(bs.open_assignments, sus, TODAY)
+check("a SUSPECTED assignment (short gone, no shares) is listed too, escalating (URGENT day 3)",
+      isinstance(sl, list) and len(sl) == 1 and sl[0].startswith("SUSPECTED URGENT day 3")
+      and "XLE 59/57P x1" in sl[0] and "not managed or valued" in sl[0], str(sl))
 check("one line per assigned spread, none for an intact one", ok and not any("IWM" in x for x in lines), str(lines))
 check("escalates with age: OPEN day 1, ESCALATION day 2, URGENT day 5",
       ok and lines[0].startswith("OPEN day 1") and lines[1].startswith("ESCALATION day 2")
