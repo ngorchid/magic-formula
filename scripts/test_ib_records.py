@@ -287,6 +287,23 @@ d.rebuild_tables()
 w = d.audit_checks({"trades": 1, "cash_transactions": 1, "open_positions": 1})
 check("a trade since 2026-10-06 without a strategy tag is flagged",
       any("no strategy tag" in x for x in w), str(w))
+fresh()
+autofx = ('<Trade tradeID="tfx" transactionID="xfx" ibExecID="FXSMLCUS.00631ea0.01.01" symbol="USD.NOK" '
+          'conid="1" assetCategory="CASH" tradeDate="20261008" buySell="SELL" currency="NOK" '
+          'quantity="-0.2329" tradePrice="9.57295" ibCommission="0" fxRateToBase="0.1045" '
+          'proceeds="2.229540055" levelOfDetail="EXECUTION" orderReference="" orderType=""/>')
+with _At("2026-10-09T08:30:00"):
+    d.archive(stmt("20261002", "20261008", autofx), "999")
+d.rebuild_tables()
+w = d.audit_checks({"trades": 1, "cash_transactions": 1, "open_positions": 1})
+check("IB's own small-balance FX conversion is NOT flagged as an untagged trade",
+      not any("no strategy tag" in x for x in w), str(w))
+fresh()
+with _At("2026-10-09T08:30:00"):
+    d.archive(stmt("20261002", "20261008", autofx.replace('proceeds="2.229540055"', 'proceeds="5000"')), "999")
+d.rebuild_tables()
+w = d.audit_checks({"trades": 1, "cash_transactions": 1, "open_positions": 1})
+check("...but the same row worth ~$522 IS flagged", any("no strategy tag" in x for x in w), str(w))
 
 print("\n" + "=" * 88)
 if _fails:

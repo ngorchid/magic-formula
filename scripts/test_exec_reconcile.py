@@ -288,6 +288,39 @@ check("an execution IB made that the ledger did not book (.02.02) -> flex_tagged
       "never silently absorbed",
       any(r["class"] == "flex_tagged_unbooked" and "0002cc.k.02.02" in r["exec_ids"] for r in t), str(t))
 
+print("\nCOMBO FILLED IN PIECES — one order, several combo executions (verified 2026-10-09, USO)")
+# The real case: USO 129/122 x2 opened 2026-10-08 filled as TWO 1-lot combo executions, each with
+# its own prefix, its own .01.01 combo id and its own .02.01 / .03.01 legs.
+PA, PB = "0002be7e.6ac7f9ed", "0002be7e.6ac7f9ee"
+A_S, A_L = (f"{PA}.02.01", "SELL", 1, 1.20, 263), (f"{PA}.03.01", "BUY", 1, 0.46, 256)
+B_S, B_L = (f"{PB}.02.01", "SELL", 1, 1.20, 263), (f"{PB}.03.01", "BUY", 1, 0.46, 256)
+SIX = [f"{PA}.01.01", f"{PA}.02.01", f"{PA}.03.01", f"{PB}.01.01", f"{PB}.02.01", f"{PB}.03.01"]
+t = legs_case([A_S, A_L, B_S, B_L], SIX)
+check("two complete combo pieces, both combo ids missing from Flex -> matched, no alert",
+      [r["class"] for r in t] == ["matched"], str(t))
+t = legs_case([A_S, A_L, B_S, B_L], [i for i in SIX if i != f"{PB}.01.01"])
+check("...also when the ledger holds only ONE of the two combo ids",
+      [r["class"] for r in t] == ["matched"], str(t))
+t = legs_case([A_S, A_L, B_S], [i for i in SIX if i != f"{PB}.03.01"])
+check("a piece missing its LONG leg (in Flex and ledger): its combo id is NOT accepted",
+      any(r["class"] == "ledger_not_in_flex" and f"{PB}.01.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case([A_S, A_L, B_S, (f"{PB}.03.01", "SELL", 1, 1.20, 263)], SIX)
+check("a piece of two executions of the SAME leg (no long leg): its combo id is NOT accepted",
+      any(r["class"] == "ledger_not_in_flex" and f"{PB}.01.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case([A_S, A_L, B_S, B_L, (f"{PB}.04.01", "SELL", 1, 1.20, 263)], SIX + [f"{PB}.04.01"])
+check("a piece with an EXTRA leg-shaped execution (.04.01): its combo id is NOT accepted",
+      any(r["class"] == "ledger_not_in_flex" and f"{PB}.01.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case([A_S, A_L, B_S, B_L], SIX + ["0002be7e.6ac7f9ef.01.01"])
+check("a third combo id with no legs in Flex is reported",
+      any(r["class"] == "ledger_not_in_flex" and "0002be7e.6ac7f9ef.01.01" in r["exec_ids"] for r in t), str(t))
+t = legs_case([A_S, A_L, B_S, B_L], SIX + [f"{PB}.01.01"])
+check("the same combo id listed twice is not counted as two pieces",
+      any(r["class"] == "ledger_not_in_flex" for r in t), str(t))
+SPLIT = [A_S, A_L, (f"{PB}.02.01", "SELL", 1, 1.20, 263), (f"{PB}.02.02", "SELL", 0, 1.20, 263), B_L]
+t = legs_case(SPLIT, SIX + [f"{PB}.02.02"])
+check("a leg split WITHIN one piece (.02.01 + .02.02) still refuses that piece's combo id",
+      any(r["class"] == "ledger_not_in_flex" and f"{PB}.01.01" in r["exec_ids"] for r in t), str(t))
+
 print("\nCLOSED IN TWO PIECES — two orders, two ledger rows, each matched once")
 fresh()
 put("20261006", "20261009",
@@ -437,6 +470,39 @@ check("an assignment-coded delivery with NO VRP ledger row still alerts",
       row("flex_untagged", "odd") != {} and any("flex_untagged: 4" in w for w in warn), str(warn))
 check("...as does one with the wrong QUANTITY, the wrong PRICE, or outside the date window",
       all(row("flex_untagged", x) != {} for x in ("dq", "dp", "dold")), str(table("exec_reconciliation")))
+
+print("\nIB AUTO FX — IB's own small-balance conversions are not untagged trades (seen 2026-10-07)")
+
+
+def fx_row(eid: str, pair: str, ccy: str, proceeds: str, rate: str, ref: str = "", otype: str = "") -> str:
+    return (f'<Trade tradeID="t{eid}" transactionID="x{eid}" ibExecID="{eid}" symbol="{pair}" '
+            f'conid="1" assetCategory="CASH" tradeDate="20261008" buySell="BUY" currency="{ccy}" '
+            f'quantity="1" tradePrice="1" ibCommission="0" fxRateToBase="{rate}" proceeds="{proceeds}" '
+            f'levelOfDetail="EXECUTION" orderReference="{ref}" orderType="{otype}" notes=""/>')
+
+
+fresh()
+put("20261006", "20261009", "".join([
+    fx_row("FXSMLCUS.00631ea0.01.01", "USD.NOK", "NOK", "2.229540055", "0.1045"),   # the real rows
+    fx_row("FXSMLCUS.00631e9d.01.01", "DKK.USD", "USD", "-0.5725798", "1"),
+    fx_row("FXSMLCUS.big.01.01", "USD.NOK", "NOK", "5000", "0.1045"),                # ~$522
+    fx_row("FXSMLCUS.mid.01.01", "USD.NOK", "NOK", "200", "0.1045"),                 # ~$21: small
+    fx_row("0000abcd.fx.01.01", "EUR.USD", "USD", "-0.65", "1"),                     # not FXSML
+    fx_row("FXSMLCUS.lmt.01.01", "GBP.USD", "USD", "-1.86", "1", otype="LMT"),       # an order
+    fx_row("FXSMLCUS.np.01.01", "GBP.USD", "USD", "", "1"),                          # no proceeds
+]), "2026-10-09T08:30:00")
+empty_ledgers()
+warn, counts = run()
+check("IB's small FXSML conversions -> ib_auto_fx, no alert for them",
+      row("ib_auto_fx", "00631ea0") != {} and row("ib_auto_fx", "00631e9d") != {}
+      and row("flex_untagged", "00631ea0") == {}, str(table("exec_reconciliation")))
+check("...the size is judged in USD (200 NOK = ~$21 passes), and above $25 it still alerts",
+      row("ib_auto_fx", "FXSMLCUS.mid") != {} and row("flex_untagged", "FXSMLCUS.big") != {},
+      str(table("exec_reconciliation")))
+check("an untagged FX trade WITHOUT the FXSML id, WITH an order type, or without proceeds still alerts",
+      all(row("flex_untagged", x) != {} for x in ("0000abcd.fx", "FXSMLCUS.lmt", "FXSMLCUS.np"))
+      and any("flex_untagged: 4" in w for w in warn), str(warn))
+check("ib_auto_fx is informational, never a failure class", "ib_auto_fx" not in d.FAIL_CLASSES, "")
 
 print("\nNEW LEDGER FIELDS — conid, commission, currency (additive)")
 fresh()

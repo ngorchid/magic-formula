@@ -26,6 +26,13 @@ TARGET = ROOT / "scripts" / "download_ib_records.py"
 SUITE = [sys.executable, str(ROOT / "scripts" / "test_ib_records.py")]
 
 MUTATIONS = [
+    # --- untagged-trade check vs IB's own small FX conversions (2026-10-09) ---
+    ('        untagged = [r for r in rows if not r.get("strategy") and not _is_ib_auto_fx(r)\n',
+     '        untagged = [r for r in rows if not r.get("strategy")\n',
+     'IB auto FX counted as untagged trades in the audit check'),
+    ('        untagged = [r for r in rows if not r.get("strategy") and not _is_ib_auto_fx(r)\n',
+     '        untagged = [r for r in rows if not r.get("strategy") and r.get("assetCategory") != "CASH"\n',
+     'every untagged FX trade exempted, whatever its size'),
     # --- attribution: the owner's rules ---
     ('return "book" if _interest_ccy(row) == base else "magic-formula"', 'return "magic-formula"',
      "USD interest charged to magic-formula instead of book"),

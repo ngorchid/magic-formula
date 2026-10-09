@@ -511,7 +511,7 @@ def audit_checks(counts: dict[str, int]) -> list[str]:
             warn.append("trades have NO orderReference column — set 'Include Audit Trail Fields: "
                         "Yes' on the Flex Query, or strategy attribution is impossible")
         tagged_from = "20261006"     # orders before this were never tagged
-        untagged = [r for r in rows if not r.get("strategy")
+        untagged = [r for r in rows if not r.get("strategy") and not _is_ib_auto_fx(r)
                     and (r.get("tradeDate") or r.get("dateTime", "")[:8]) >= tagged_from]
         if untagged:
             warn.append(f"{len(untagged)} trade(s) since {tagged_from} have no strategy tag "
@@ -641,8 +641,18 @@ def check_descriptions() -> list[str]:
 # the legs' prefix and is sequence .01, the legs following as .02, .03: e.g. combo
 # 0002be7d.6ac5508e.01.01, legs .02.01 / .03.01. So ONE missing id on a spread whose legs all
 # matched is accepted as the combo-level id ONLY if it is exactly that sibling (_is_combo_level_id);
-# any other missing id is reported. A combo that partially fills into several executions has not
-# been seen yet -- it would surface as ledger_not_in_flex, to be calibrated then.
+# any other missing id is reported. CALIBRATED 2026-10-09 for a combo that fills in PIECES: the USO
+# 129/122 x2 spread opened 2026-10-08 filled as two 1-lot combo executions, each with its OWN prefix
+# (0002be7e.6ac7f9ed / .6ac7f9ee), its own .01.01 combo id and its own .02.01 / .03.01 legs. So
+# several missing ids are accepted when each is the combo id of one complete piece -- exactly one
+# execution per leg, every leg present (_combo_level_ids_ok). A leg split WITHIN one piece (.02.02)
+# is still reported.
+#
+# IB's own small-balance FX conversions (_is_ib_auto_fx) are no order of any sleeve: classed
+# ib_auto_fx (informational) instead of flex_untagged. Signature first seen 2026-10-07 21:54: four
+# CASH rows (DKK 3.82, EUR 0.58, GBP 1.41, NOK 2.23 bought against USD), exec ids FXSML..., no
+# order type, no order reference. Above AUTO_FX_MAX_USD the row still alerts as untagged.
+AUTO_FX_MAX_USD = 25.0
 LINKED_FROM = "20261006"          # first day orders carried a tag and ledgers kept exec ids
 AGEING_DAYS = 3                   # a ledger id still not covered by any statement after this
                                   # many business days alerts (IB lag is normally one day)
@@ -826,6 +836,37 @@ def _is_combo_level_id(missing: str, leg_ids: list[str]) -> bool:
     return True
 
 
+def _combo_level_ids_ok(missing: list[str], found: list[dict], leg_keys: set) -> bool:
+    """True if EVERY missing id is the combo-level id of one complete combo piece in `found`.
+    Pieces are grouped by execution-id prefix; the piece of each missing id must hold exactly one
+    execution per leg, covering every leg, and the id must pass the exact rule
+    (_is_combo_level_id). One piece is the ordinary case; several are a combo filled in pieces
+    (verified 2026-10-09, USO)."""
+    if not missing or not found:
+        return False
+    pieces: dict[str, list[dict]] = {}
+    for e in found:
+        pieces.setdefault(".".join(e["ibExecID"].split(".")[:-2]), []).append(e)
+    combos = {".".join(m.split(".")[:-2]): m for m in missing}
+    if len(combos) != len(missing) or not set(combos) <= set(pieces):
+        return False
+    for prefix in combos:
+        execs = pieces[prefix]
+        if (len(execs) != len(leg_keys) or {_flex_key(e) for e in execs} != leg_keys
+                or not _is_combo_level_id(combos[prefix], [e["ibExecID"] for e in execs])):
+            return False
+    return True
+
+
+def _is_ib_auto_fx(e: dict) -> bool:
+    """IB's own conversion of a small foreign-currency balance (see AUTO_FX_MAX_USD): CASH, exec id
+    FXSML..., no order type, no order reference, and worth at most AUTO_FX_MAX_USD."""
+    if (e.get("assetCategory") != "CASH" or e.get("orderReference") or e.get("orderType")
+            or not (e.get("ibExecID") or "").startswith("FXSML") or e.get("proceeds") in (None, "")):
+        return False
+    return abs(float(e["proceeds"]) * float(e.get("fxRateToBase") or 1)) <= AUTO_FX_MAX_USD
+
+
 def _flex_key(e: dict) -> tuple:
     cat = e.get("assetCategory", "")
     if cat == "OPT":
@@ -959,10 +1000,9 @@ def reconcile_executions() -> tuple[list[str], dict[str, int]]:
             absent = [i for i in fl["exec_ids"] if i not in by_id]
             used.update(i for i in fl["exec_ids"] if i in by_id)
             legs_found = {_flex_key(e) for e in found}
-            if (absent and fl["kind"] == "OPT" and len(absent) == 1
-                    and legs_found == {leg["key"] for leg in fl["legs"]}
-                    and _is_combo_level_id(absent[0], [e["ibExecID"] for e in found])):
-                absent = []                            # the combo-level id (verified rule)
+            if (absent and fl["kind"] == "OPT"
+                    and _combo_level_ids_ok(absent, found, {leg["key"] for leg in fl["legs"]})):
+                absent = []                            # the combo-level id(s) (verified rule)
             if absent and not found:
                 if covered(fl["date"]):
                     emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], absent,
@@ -979,8 +1019,8 @@ def reconcile_executions() -> tuple[list[str], dict[str, int]]:
                          and legs_found == {leg["key"] for leg in fl["legs"]})
                 emit("ledger_not_in_flex", fl["sleeve"], fl["date"], fl["ref"], absent,
                      (f"combo-level id NOT accepted: {len(found)} executions for "
-                      f"{len(fl['legs'])} legs (partial fills?) — the rule is verified only for "
-                      f"one execution per leg; check the fill in IB and calibrate"
+                      f"{len(fl['legs'])} legs (partial fills?) — each combo piece must have "
+                      f"exactly one execution per leg; check the fill in IB and calibrate"
                       if extra else "part of this fill's ids are missing from Flex"))
                 continue
             diffs = _compare(fl, found)
@@ -1022,6 +1062,9 @@ def reconcile_executions() -> tuple[list[str], dict[str, int]]:
             emit("flex_tagged_unbooked", strat, date, desc, [e["ibExecID"]],
                  "ledger unavailable" if strat in missing_ledgers
                  else f"tagged {e.get('orderReference')} but no {strat} ledger entry has this id")
+        elif _is_ib_auto_fx(e):
+            emit("ib_auto_fx", e.get("sleeve") or "book", date, desc, [e["ibExecID"]],
+                 "IB's own small-balance FX conversion, no order")
         else:
             codes = {c.strip() for c in (e.get("notes") or "").split(";")}
             linked = codes & {"A", "Ex", "Ep"} and _assignment_for(e, date)
