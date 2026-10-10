@@ -148,9 +148,10 @@ def _error(root: ET.Element) -> tuple[str, str] | None:
         root, encoding="unicode")[:200]
 
 
-def download(token: str, query_id: str, max_wait: int = 300) -> bytes:
-    """Return the statement XML bytes exactly as IB sent them."""
-    root = ET.fromstring(_get(SEND_URL, {"t": token, "q": query_id, "v": 3}))
+def download(token: str, query_id: str, max_wait: int = 300, extra: dict | None = None) -> bytes:
+    """Return the statement XML bytes exactly as IB sent them. `extra` adds SendRequest
+    parameters, e.g. {"fd": "20260813", "td": "20261009"} to override the query's period."""
+    root = ET.fromstring(_get(SEND_URL, {"t": token, "q": query_id, "v": 3, **(extra or {})}))
     err = _error(root)
     if err:
         raise FlexError(*err)
@@ -1204,6 +1205,17 @@ def main() -> int:
             log(f"FAILED: {type(e).__name__}: {e}")
             alert("[IB records] download failed", f"{type(e).__name__}: {e}")
             return 1
+
+        # Inception-to-date TWR + S&P 500 for the book summary (scripts/inception_twr.py). A second
+        # statement over the account's whole life; best effort -- never fails the archive run.
+        try:
+            import inception_twr
+            r = inception_twr.update(RECORDS, lambda fd, td: download(token, qid, extra={"fd": fd, "td": td}),
+                                     EXPECT_ACCOUNT)
+            log(f"inception TWR {float(r['twr']):+.2f}% ({r['fromDate']}..{r['toDate']}), "
+                f"S&P 500 TR {r['bench_ret'] or 'n/a'}")
+        except Exception as e:  # noqa: BLE001
+            log(f"inception TWR not updated (ignored): {type(e).__name__}: {e}")
 
     counts = rebuild_tables()
     log("tables: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"))

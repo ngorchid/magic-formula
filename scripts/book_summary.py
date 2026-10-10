@@ -186,7 +186,7 @@ def ibkr_twr() -> tuple[float, str, str] | None:
     """(time-weighted return, from, to) as IBKR reports it in the Flex ChangeInNAV section of the
     most recent statement -- IBKR's own account-level TWR, the number for anything outside-facing.
     None when the archive or the field is unavailable. NB the daily query's window is rolling
-    (7 days); an inception-to-date figure needs a second Flex query over that period."""
+    (7 days); the inception-to-date figure is itd_line()."""
     p = RECORDS_DIR / "tables" / "change_in_nav.csv"
     if not p.exists():
         return None
@@ -200,6 +200,28 @@ def ibkr_twr() -> tuple[float, str, str] | None:
         return float(r["twr"]), r.get("fromDate", ""), r.get("toDate", "")
     except Exception:  # noqa: BLE001
         return None
+
+
+def itd_line() -> str:
+    """Inception-to-date account TWR (IBKR) vs the S&P 500 total return over the same window, from
+    the last row of IB-records/itd/twr_history.csv (written by scripts/inception_twr.py)."""
+    try:
+        import inception_twr
+        r = inception_twr.latest(RECORDS_DIR)
+        if not r:
+            return "unavailable (no itd/twr_history.csv in the IB records archive)"
+        twr = float(r["twr"])
+        s = f"{twr:+.2f}% ({r['fromDate']}–{r['toDate']}, IBKR)"
+        if r.get("bench_ret") not in (None, ""):
+            b = float(r["bench_ret"])
+            span = "" if (r["bench_from"], r["bench_to"]) == (r["fromDate"], r["toDate"]) else \
+                f" ({r['bench_from']}–{r['bench_to']})"
+            s += f" vs S&P 500 TR {b:+.2f}%{span} → {twr - b:+.2f} pp"
+        else:
+            s += " vs S&P 500: unavailable"
+        return s
+    except Exception as e:  # noqa: BLE001
+        return f"unavailable ({type(e).__name__})"
 
 
 def open_assignments(options_path, today: str) -> list[str]:
@@ -444,7 +466,8 @@ def build() -> tuple[str, str]:
         f"not found at {OPTIONS_STATE} (set OPTIONS_STATE)</p>")
     pv_line = asg_block + (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
                f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b><br>"
-               f"<b>Account TWR:</b> {twr_str}</p>"
+               f"<b>Account TWR:</b> {twr_str}<br>"
+               f"<b>Since inception:</b> {itd_line()}</p>"
                f"<p style='color:#64748b;font-size:11px;margin:4px 0'>Sleeves are shown in dollars; "
                f"any percentage is against the disclosed notional base in brackets "
                f"(docs/capital_bases.md). Use the account TWR for anything outside-facing.</p>"

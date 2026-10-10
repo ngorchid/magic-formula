@@ -115,14 +115,33 @@ Nothing is lost on Sunday/Monday: each download's 7-day window overlaps the prev
 raw/YYYY/flex_<query>_<from>_<to>_<downloaded>.xml   immutable, exactly as IB sent it (write-once)
 manifest.jsonl                                      append-only: file, sha256, bytes, period, account
 tables/*.csv                                        derived from ALL raw files each run; disposable
+itd/latest.xml, itd/twr_history.csv                 inception-to-date TWR (see below)
 ```
 
 - Raw files are never modified; verify any of them against its `sha256` in the manifest.
 - `tables/trades.csv` adds `strategy` and `run_id` (parsed from `orderReference`) and keeps the
   latest version of each IB trade id, so IB corrections replace the earlier record.
 - `--rebuild` regenerates the tables offline from raw.
-- The folder lives outside every checkout so a re-clone can't touch it. **It is not yet backed
-  up** — it should be (it is the books of record).
+- The folder lives outside every checkout so a re-clone can't touch it; the nightly OneDrive
+  backup copies it (docs/backup.md).
+
+## Inception-to-date TWR vs the S&P 500 (2026-10-10)
+
+The book summary's "Account TWR" is the daily statement's rolling 7-day window. After each daily
+download, `scripts/inception_twr.py` requests the SAME query a second time with SendRequest `fd`/`td`
+(account funding day `ACCOUNT_INCEPTION`, default 20260813 → yesterday) and reads IBKR's own
+ChangeInNAV `twr` for the whole life of the account. One request covers at most 365 days; longer
+histories are split and the TWRs chained. The S&P 500 Total Return index (`^SP500TR`, yfinance)
+over the same dates is stored beside it. The book summary shows the last row as "Since inception".
+
+- Stored in `itd/` and NOT in `raw/` or `tables/`: the statement repeats data the daily ones
+  already archive (only the latest is kept), and its ChangeInNAV would otherwise replace the
+  weekly headline in `tables/change_in_nav.csv`.
+- Best effort: a failure is logged and never fails the archive run; the email then shows the last
+  row's dates, so a stale figure is visible.
+- First value (2026-10-10): account +1.46% vs S&P 500 TR +0.37% (13 Aug–9 Oct). The account TWR is
+  net of all costs and spans every sleeve (equities, futures overlay, options), so the S&P 500 is a
+  reference point, not a like-for-like index.
 
 ## Attribution of events without an order (owner's rules, 2026-10-06)
 

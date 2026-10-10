@@ -86,6 +86,42 @@ check("the most recent statement's TWR is read (latest toDate, widest window)",
 bs.RECORDS_DIR = tmp / "missing"
 check("no archive -> None (headline says unavailable)", bs.ibkr_twr() is None, "")
 
+print("\nSINCE INCEPTION vs S&P 500")
+bs.RECORDS_DIR = tmp / "missing"
+check("no ITD history -> says unavailable", bs.itd_line().startswith("unavailable"), bs.itd_line())
+(rec / "itd").mkdir()
+_hist = rec / "itd" / "twr_history.csv"
+
+
+def write_itd(*rows):
+    with open(_hist, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["asof", "fromDate", "toDate", "twr", "bench_from", "bench_to", "bench_ret"])
+        w.writeheader()
+        w.writerows(rows)
+
+
+write_itd({"asof": "2026-10-09", "fromDate": "20260813", "toDate": "20261008", "twr": "0.5",
+           "bench_from": "20260813", "bench_to": "20261008", "bench_ret": "0.1"},
+          {"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "1.459565",
+           "bench_from": "20260813", "bench_to": "20261009", "bench_ret": "0.369221"})
+bs.RECORDS_DIR = rec
+il = safe(bs.itd_line)
+check("the latest row: account TWR vs S&P 500 TR and the difference in points",
+      il == "+1.46% (20260813–20261009, IBKR) vs S&P 500 TR +0.37% → +1.09 pp", il)
+write_itd({"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "1.459565",
+           "bench_from": "20260813", "bench_to": "20261008", "bench_ret": "0.2"})
+il = safe(bs.itd_line)
+check("a benchmark over different dates shows its own dates", "S&P 500 TR +0.20% (20260813–20261008)" in il, il)
+write_itd({"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "-0.5",
+           "bench_from": "", "bench_to": "", "bench_ret": ""})
+il = safe(bs.itd_line)
+check("no benchmark -> the TWR alone and 'S&P 500: unavailable' (never 0%)",
+      il == "-0.50% (20260813–20261009, IBKR) vs S&P 500: unavailable", il)
+write_itd({"asof": "2026-10-09", "fromDate": "20260813", "toDate": "20261008", "twr": "0.5",
+           "bench_from": "20260813", "bench_to": "20261008", "bench_ret": "0.1"},
+          {"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "1.459565",
+           "bench_from": "20260813", "bench_to": "20261009", "bench_ret": "0.369221"})
+
 print("\nIN THE EMAIL")
 bs.RECORDS_DIR = rec
 bs.MAGIC_STATE, bs.OPTIONS_STATE, bs.TREND_STATE = magic, opt, tmp / "no-trend.json"
@@ -97,6 +133,9 @@ _b = safe(bs.build)
 body = _b[1] if isinstance(_b, tuple) else str(_b)
 check("the account TWR (IBKR) is the headline", "<b>Account TWR:</b> +1.25% (20260930–20261006, IBKR)" in body,
       re.findall(r"Account TWR[^<]*</b>[^<]*", body))
+check("the since-inception line is in the email",
+      "<b>Since inception:</b> +1.46% (20260813–20261009, IBKR) vs S&P 500 TR +0.37% → +1.09 pp" in body,
+      re.findall(r"Since inception[^<]*</b>[^<]*", body))
 check("the overlap line is in the email", "Names held by both sleeves: AAPL" in body, "")
 check("a sleeve percentage names its disclosed base",
       "of $50,000)" in body, re.findall(r"\([-0-9.]+% of \$[0-9,]+\)", body))
