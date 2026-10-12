@@ -42,6 +42,10 @@ function Show-Status {
     if ($t) {
         $i = $t | Get-ScheduledTaskInfo
         Write-Host ("Task ${TaskName}: $($t.State), last run $($i.LastRunTime), last result $($i.LastTaskResult)")
+    } elseif (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        # A SYSTEM task is invisible to a non-elevated shell ("Access is denied"), installed or not.
+        Write-Host "Task ${TaskName}: cannot be seen without admin rights (run -Check elevated); the log below shows whether it runs"
     } else { Write-Host "Task ${TaskName}: not installed" }
     if (Test-Path "$LogDir\log.txt") { Write-Host "Last log lines:"; Get-Content "$LogDir\log.txt" -Tail 5 }
 }
