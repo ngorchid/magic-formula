@@ -11,6 +11,13 @@ email, and a relaunch that on 2026-10-09 KILLED the self-restarting Gateway mid-
 fresh 2FA login and a 3-hour outage (12:00-15:00). So a failed connect is retried once after
 RETRY_DELAY_S; only if that fails too is the Gateway relaunched and the alert sent. A logged-out
 Gateway (weekly 2FA) stays down, so both attempts fail and it alerts as before.
+
+DISCONNECTED REMOTE DESKTOP (2026-10-12). While the Windows session is a DISCONNECTED Remote
+Desktop session it has no display, and the Gateway (a Java desktop app) cannot open its login
+window: IBC loops on "failed to display login dialog" and never logs in, so NO 2FA push is ever
+sent. 2026-10-12: 74 such loops 08:00-09:22; the window opened 6 s after an RDP reconnect. So the
+alert says so instead of "approve the push". Fix on the box: leave RDP via
+ops/disconnect_to_console.bat (hands the session to the console, which keeps a display).
 """
 import os
 import smtplib
@@ -74,6 +81,27 @@ def alert(subject: str, body: str) -> None:
     print(f"alert emailed to {to}")
 
 
+def session_disconnected() -> bool | None:
+    """True if this process's Windows session is a DISCONNECTED (Remote Desktop) session, False if
+    it has a display (active RDP or console, locked or not), None if it can't be told."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        wts, k32 = ctypes.windll.wtsapi32, ctypes.windll.kernel32
+        sid = wintypes.DWORD()
+        if not k32.ProcessIdToSessionId(k32.GetCurrentProcessId(), ctypes.byref(sid)):
+            return None
+        buf, n = ctypes.c_void_p(), wintypes.DWORD()
+        if not wts.WTSQuerySessionInformationW(None, sid, 8, ctypes.byref(buf), ctypes.byref(n)):
+            return None                                   # 8 = WTSConnectState
+        try:
+            return ctypes.cast(buf, ctypes.POINTER(ctypes.c_int)).contents.value == 4  # WTSDisconnected
+        finally:
+            wts.WTSFreeMemory(buf)
+    except Exception:  # noqa: BLE001 — never let this break the check
+        return None
+
+
 def managed_accounts() -> list[str]:
     """Connect, read the logged-in accounts, disconnect. Raises if the Gateway does not answer."""
     ib = IB()
@@ -98,14 +126,26 @@ def main() -> int:
             # Auto-recover BEFORE emailing, and report what happened in the same alert, so you get
             # one message that already tells you whether to just approve the push or intervene.
             relaunched = relaunch_gateway()
-            tail = ("An auto-restart was triggered — APPROVE the IBKR Mobile 2FA push on your phone "
-                    "to bring it back up. No need to log into the machine.\n\n(If it does not come "
-                    "up, the weekly login may need attention, or the box is logged off so the task "
-                    "could not run.)"
-                    if relaunched else
-                    "AUTO-RESTART COULD NOT BE LAUNCHED — a manual restart is needed.")
-            alert("[magic-formula LIVE] Gateway DOWN — auto-restart triggered, APPROVE the 2FA push"
-                  if relaunched else "[magic-formula LIVE] Gateway DOWN — AUTO-RESTART FAILED, manual fix",
+            disc = session_disconnected()
+            if relaunched and disc:
+                subject = ("[magic-formula LIVE] Gateway DOWN — CONNECT BY REMOTE DESKTOP "
+                           "(no 2FA push will come until you do)")
+                tail = ("An auto-restart was triggered, BUT this PC's Remote Desktop session is "
+                        "DISCONNECTED: the Gateway cannot open its login window without a display, "
+                        "so it cannot log in and IB will NOT send a 2FA push.\n\nConnect to the PC "
+                        "by Remote Desktop: the login window opens within seconds and the push "
+                        "follows — approve it. Then leave with the 'Disconnect to console' desktop "
+                        "shortcut (ops/disconnect_to_console.bat), NOT by closing the RDP window.")
+            elif relaunched:
+                subject = "[magic-formula LIVE] Gateway DOWN — auto-restart triggered, APPROVE the 2FA push"
+                tail = ("An auto-restart was triggered — APPROVE the IBKR Mobile 2FA push on your phone "
+                        "to bring it back up. No need to log into the machine.\n\n(If it does not come "
+                        "up, the weekly login may need attention, or the box is logged off so the task "
+                        "could not run.)")
+            else:
+                subject = "[magic-formula LIVE] Gateway DOWN — AUTO-RESTART FAILED, manual fix"
+                tail = "AUTO-RESTART COULD NOT BE LAUNCHED — a manual restart is needed."
+            alert(subject,
                   f"Could not connect to the live IB Gateway on 127.0.0.1:{PORT} (twice, "
                   f"{RETRY_DELAY_S} s apart).\n\nError: {type(e).__name__}: {e}\n\n{tail}\n\n"
                   f"Must be up before the 16:00 CET run.")

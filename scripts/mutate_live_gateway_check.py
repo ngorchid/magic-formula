@@ -30,6 +30,15 @@ MUTATIONS = [
     (F, '    except Exception as first:  # noqa: BLE001\n        print(',
      '    except Exception as first:  # noqa: BLE001\n        raise first\n        print(',
      'a failed first attempt crashes the check'),
+    (F, '            if relaunched and disc:\n', '            if False:\n',
+     'a disconnected RDP session still says "approve the push"'),
+    (F, '            if relaunched and disc:\n', '            if relaunched:\n',
+     'every outage blamed on Remote Desktop'),
+    (F, '            disc = session_disconnected()\n', '            disc = True\n',
+     'the session state is never read'),
+    # Not seeded: the WTS state constant (4 = WTSDisconnected) -- the real probe's answer depends on
+    # whether someone is connected while the suite runs. Checked by hand on 2026-10-12: state 0
+    # (Active) while connected by RDP.
 ]
 
 if __name__ == "__main__":
