@@ -1,6 +1,6 @@
 """Tests for the owner's buy exclusions (PaperConfig.no_buy, scripts/run_paper.py NO_BUY).
 
-2026-10-13: CTVA is kept out of NEW buys until 2026-11-01 -- Corteva separated on 2026-10-01
+2026-10-13: CTVA is kept out of NEW buys until 2027-03-01 -- Corteva separated on 2026-10-01
 and the frozen October ranking scores the pre-separation company. No IB, no network.
 
 Run: python scripts/test_no_buy.py
@@ -100,7 +100,7 @@ check("an excluded name that is already held is NOT sold because of the exclusio
 
 print("\nTHE LIVE CONFIG")
 import run_paper  # noqa: E402
-check("NO_BUY holds CTVA until 2026-11-01", run_paper.NO_BUY.get("CTVA", ("",))[0] == "2026-11-01",
+check("NO_BUY holds CTVA until 2027-03-01", run_paper.NO_BUY.get("CTVA", ("",))[0] == "2027-03-01",
       str(run_paper.NO_BUY))
 try:
     _cfg = run_paper.paper_config()

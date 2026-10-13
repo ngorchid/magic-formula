@@ -291,8 +291,12 @@ NO_BUY = {
     # Owner's decision 2026-10-13. Corteva separated on 2026-10-01 (Yahoo books it as a 6.665
     # "split": $77.65 -> $12.57). The October ranking (built 2026-10-01 10:20 CET, before the US
     # open) scores the PRE-separation company (rank 23), and stays frozen all month.
-    "CTVA": ("2026-11-01", "Corteva separation 2026-10-01; the October ranking scores the "
-                           "pre-separation company"),
+    # Extended to 2027-03-01 (owner, same day): the November-February rebuilds may still pair the
+    # old company's reported earnings (the Jul-Sep quarter predates the separation) with the much
+    # smaller post-separation market value -- an inflated earnings yield that could rank CTVA near
+    # the top. By March its first post-separation results should be in the fundamentals.
+    "CTVA": ("2027-03-01", "Corteva separation 2026-10-01; rankings until the first "
+                           "post-separation results score the pre-separation company"),
 }
 
 

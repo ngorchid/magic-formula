@@ -35,7 +35,7 @@ NO_BUY = [
      "still excluded ON the 'until' day (off by one)"),
     (R, "    return PaperConfig(budget=budget, no_buy=NO_BUY)", "    return PaperConfig(budget=budget)",
      "the live config drops the exclusions"),
-    (R, '    "CTVA": ("2026-11-01",', '    "CTVA": ("2026-10-01",', "CTVA's exclusion already expired"),
+    (R, '    "CTVA": ("2027-03-01",', '    "CTVA": ("2026-11-01",', "CTVA's exclusion ends in November again"),
 ]
 
 if __name__ == "__main__":
