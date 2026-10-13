@@ -47,7 +47,10 @@ elif sleeve == "magic-formula":
     from paper.state import PortfolioState, Position
     cfg = (PaperConfig(budget=float(os.getenv("BUDGET", "100000"))) if mode == "old"
            else r.paper_config())
-    out["cfg"] = {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(cfg).items()}
+    # no_buy (owner buy exclusions, 2026-10-13) decides WHICH names may be bought, not how big an
+    # order is, and changes with each exclusion -- it is not part of the sizing fingerprint.
+    out["cfg"] = {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(cfg).items()
+                  if k != "no_buy"}
     class B:
         dry_run = True
         def __init__(self): self.orders = []

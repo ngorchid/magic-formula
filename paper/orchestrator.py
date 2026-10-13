@@ -15,7 +15,7 @@ finally hard-capped at available cash. Gross therefore lands ON budget rather th
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -90,6 +90,11 @@ class PaperConfig:
     # this up, and it is the input the whole calculation is most sensitive to.
     fx_sweep_min_usd: float = 500.0
     fx_sweep: bool = True
+    # OWNER EXCLUSIONS from NEW BUYS: {ticker: (until "YYYY-MM-DD", exclusive; reason)}. For a name
+    # whose monthly-cached ranking no longer describes the company that now trades under the ticker
+    # (a separation / spin-off after the rebuild). Sells and holds are untouched -- no guard may
+    # block a close. Expired entries do nothing; set in scripts/run_paper.py (NO_BUY).
+    no_buy: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def plan_fx_sweep(balances: dict[str, float], fx: dict[str, float],
@@ -451,6 +456,10 @@ def run_daily(state: PortfolioState, ranking: pd.Series, panels: dict, fx: dict,
                 continue
             if t in stale_px:
                 logging.info("skip %s — stale price (%dd since it last moved)", t, stale_px[t])
+                continue
+            _nb = cfg.no_buy.get(t)
+            if _nb and today < _nb[0]:
+                logging.info("skip %s — excluded from buys until %s (%s)", t, _nb[0], _nb[1])
                 continue
             price_local = marks[t]
             f = fx.get(ccy.get(t, "USD"), 1.0)

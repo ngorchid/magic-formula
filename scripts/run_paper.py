@@ -18,7 +18,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -142,11 +141,28 @@ def _refresh_marks(panels: dict, tickers: set[str]) -> dict:
     except Exception as e:  # noqa: BLE001
         logging.warning("mark refresh failed (%s) — using cached prices", e)
         return panels
+    # Every fetched bar goes on its OWN date (2026-10-13). price_sane compares the newest bar with
+    # the one before it: if those sat on different split bases, a mid-month split read as a ~50%
+    # crash and every buy of that name was rejected until the monthly rebuild (APH 2:1 on
+    # 2026-09-03). The newest two bars now both come from this one split-adjusted fetch, so they
+    # always share a basis; a genuine bad print in the newest bar still differs from its prior.
+    #
+    # Until 2026-10-13 only the newest close went on TODAY's row and the prior close overwrote "the
+    # latest earlier row with data". The panel is reloaded from the monthly cache every run, so
+    # that row was always the CACHE DATE: the days between were missing, and whenever the newest
+    # close equalled the prior one (a London name at 16:00 CET, before its day's bar exists),
+    # stale_columns read "unchanged since the cache date" and dropped a good candidate from buys
+    # (DVN 10d, EN.PA 10d, BWLPG.OL 5d, INCY 8d, AAF.L 11d -- each exactly the days since the
+    # rebuild). A name with no bar yet today now leaves today's row empty; marks and priors read
+    # the last non-empty bars, so the mark is unchanged.
     adj = panels["adj"]
     day = pd.Timestamp.today().normalize()
-    if day not in adj.index:
-        adj.loc[day] = np.nan
-    adj = adj.sort_index()
+    pidx = pd.DatetimeIndex(px.index)
+    if pidx.tz is not None:
+        pidx = pidx.tz_localize(None)
+    px = px.set_axis(pidx.normalize(), axis=0)
+    px = px[~px.index.duplicated(keep="last")]
+    adj = adj.reindex(adj.index.union(px.index).union([day]))
     n = 0
     for t in px.columns:
         if t not in adj.columns:
@@ -154,19 +170,7 @@ def _refresh_marks(panels: dict, tickers: set[str]) -> dict:
         s = px[t].dropna()
         if s.empty:
             continue
-        adj.loc[day, t] = float(s.iloc[-1])
-        # Refresh the PRIOR close too, from the SAME (split-adjusted) fetch. price_sane compares
-        # today's mark against adj.iloc[-2]: if the two sit on different split bases, a mid-month
-        # split reads as a ~50% crash and EVERY buy of that name is rejected until the monthly
-        # cache rebuilds. The monthly panel is frozen, so a split occurring after the last rebuild
-        # (APH 2:1 on 2026-09-03) leaves the cached prior pre-split while this live bar is post-
-        # split — a phantom 48% move. Overwriting the most recent prior bar with this fetch's own
-        # prior keeps both on one basis. A genuine bad print in today's bar still differs from the
-        # fresh prior, so the guard's real purpose is preserved.
-        if len(s) >= 2:
-            prior = adj.index[(adj.index < day) & adj[t].notna()]
-            if len(prior):
-                adj.loc[prior[-1], t] = float(s.iloc[-2])
+        adj.loc[s.index, t] = s.values
         n += 1
     panels["adj"] = adj.sort_index()
     logging.info("Refreshed today's prices for %d/%d names.", n, len(tickers))
@@ -279,7 +283,17 @@ def paper_config() -> PaperConfig:
         documents it and is never used for sizing."""
     budget, src = documented_sizing(ROOT, "magic-formula")
     log_sizing("magic-formula", budget, src)
-    return PaperConfig(budget=budget)
+    return PaperConfig(budget=budget, no_buy=NO_BUY)
+
+
+# Owner exclusions from NEW buys (orchestrator PaperConfig.no_buy): {ticker: (until, reason)}.
+NO_BUY = {
+    # Owner's decision 2026-10-13. Corteva separated on 2026-10-01 (Yahoo books it as a 6.665
+    # "split": $77.65 -> $12.57). The October ranking (built 2026-10-01 10:20 CET, before the US
+    # open) scores the PRE-separation company (rank 23), and stays frozen all month.
+    "CTVA": ("2026-11-01", "Corteva separation 2026-10-01; the October ranking scores the "
+                           "pre-separation company"),
+}
 
 
 def main(dry_run: bool = False, force: bool = False) -> None:
