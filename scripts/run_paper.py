@@ -126,6 +126,51 @@ def _refresh_ranking(today: str, cfg_mf: EnhancedMagicConfig):
     return ranking, panels
 
 
+def _ensure_held_prices(panels: dict, held: dict[str, str]) -> dict:
+    """Add price history for HELD names that are missing from the panel. `held`: {ticker: ccy}.
+
+    WHY. The monthly pull fetches the CURRENT universe only. A held name that has left its
+    index (or changed ticker) is then absent from `adj`, gets no mark, and `PortfolioState.nav`
+    skips it -- i.e. values it at ZERO until its clock sells it, up to 21 trading days. That
+    understates NAV by ~3% per name and feeds the breaker a loss that is not real.
+
+    PRICES ONLY. The ranking was computed (and cached) before this runs, so an added name gets no
+    rank, stays out of the hold band, and is sold on its clock exactly as before: exits do not
+    change. A held name still without a price afterwards is logged as an ERROR, never silent."""
+    adj = panels["adj"]
+    missing = sorted(t for t in held if t and t not in adj.columns)
+    if not missing:
+        return panels
+    px = pd.DataFrame()
+    try:
+        raw = yf.download(missing, start=adj.index[0], auto_adjust=True, progress=False,
+                          threads=True)
+        if raw is not None and not raw.empty:
+            px = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]]
+            if isinstance(px, pd.Series):
+                px = px.to_frame(missing[0])
+            if list(px.columns) == ["Close"]:
+                px.columns = [missing[0]]
+    except Exception as e:  # noqa: BLE001
+        logging.warning("held-name price download failed (%s)", e)
+    added = []
+    for t in missing:
+        if t in px.columns and px[t].notna().any():
+            # Aligned to the panel's own dates: adding rows would change every other column.
+            adj[t] = px[t].reindex(adj.index)
+            panels["currency"].setdefault(t, held[t])
+            added.append(t)
+    panels["adj"] = adj
+    if added:
+        logging.warning("held name(s) not in this month's universe, prices added for valuation "
+                        "only (no rank; sold on their clock): %s", ", ".join(added))
+    lost = [t for t in missing if t not in added]
+    if lost:
+        logging.error("HELD position(s) with NO price: %s — valued at ZERO in NAV. Check for a "
+                      "ticker change or delisting and handle by hand", ", ".join(lost))
+    return panels
+
+
 def _refresh_marks(panels: dict, tickers: set[str]) -> dict:
     """Patch TODAY's prices into the (monthly-cached) price panel for a small set of
     tickers — held names + top candidates — so daily P&L, sizing and marks are current
@@ -331,6 +376,8 @@ def main(dry_run: bool = False, force: bool = False) -> None:
         cfg.max_new_buys_per_day = 0
 
     ranking, panels = _refresh_ranking(today, cfg_mf)
+    # Held names that left the universe at the monthly pull: prices only, AFTER the ranking.
+    panels = _ensure_held_prices(panels, {p.ticker: p.currency for p in state.positions})
     # Daily light refresh: current prices for held names + top candidates (marks/sizing/P&L).
     refresh_set = state.tickers | set(list(ranking.index)[:100])
     panels = _refresh_marks(panels, refresh_set)
