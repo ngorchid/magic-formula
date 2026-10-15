@@ -202,26 +202,57 @@ def ibkr_twr() -> tuple[float, str, str] | None:
         return None
 
 
-def itd_line() -> str:
+def _d(yyyymmdd: str) -> str:
+    """'20261013' -> '13 Oct 2026'."""
+    return datetime.strptime(str(yyyymmdd), "%Y%m%d").strftime("%d %b %Y").lstrip("0")
+
+
+def itd_line(today: str | None = None) -> str:
     """Inception-to-date account TWR (IBKR) vs the S&P 500 total return over the same window, from
-    the last row of IB-records/itd/twr_history.csv (written by scripts/inception_twr.py)."""
+    the last row of IB-records/itd/twr_history.csv (written by scripts/inception_twr.py).
+
+    The IB statement ends the day BEFORE the 08:30 download, so in the evening email it never
+    includes today. Said in words (2026-10-15): on 14 Oct the line read +1.45% (to 13 Oct) right
+    under a live value of $48,857, i.e. -2.29% on the $50,000 deposited, and read as a
+    contradiction. The live figure is live_itd_line()."""
+    today = today or datetime.now().strftime("%Y-%m-%d")
     try:
         import inception_twr
         r = inception_twr.latest(RECORDS_DIR)
         if not r:
             return "unavailable (no itd/twr_history.csv in the IB records archive)"
         twr = float(r["twr"])
-        s = f"{twr:+.2f}% ({r['fromDate']}–{r['toDate']}, IBKR)"
+        behind = r["toDate"] < today.replace("-", "")
+        s = (f"{twr:+.2f}% from {_d(r['fromDate'])} to {_d(r['toDate'])} "
+             f"(IB statement{', not yet including today' if behind else ''})")
         if r.get("bench_ret") not in (None, ""):
             b = float(r["bench_ret"])
             span = "" if (r["bench_from"], r["bench_to"]) == (r["fromDate"], r["toDate"]) else \
-                f" ({r['bench_from']}–{r['bench_to']})"
+                f" ({_d(r['bench_from'])} to {_d(r['bench_to'])})"
             s += f" vs S&P 500 TR {b:+.2f}%{span} → {twr - b:+.2f} pp"
         else:
             s += " vs S&P 500: unavailable"
         return s
     except Exception as e:  # noqa: BLE001
         return f"unavailable ({type(e).__name__})"
+
+
+def live_itd_line(net_liq: float | None) -> str:
+    """Today's account value against the money put in: value / (starting value + net deposits) - 1,
+    both from the latest IB inception statement. Equals the TWR while the only deposit is the one at
+    inception; after a later deposit or withdrawal it is a return on money in, not a TWR. A deposit
+    made since the statement's end date is not in it yet."""
+    if net_liq is None:
+        return "unavailable (no account value)"
+    try:
+        import inception_twr
+        r = inception_twr.latest(RECORDS_DIR)
+        put_in = float(r.get("startingValue") or 0) + float(r.get("depositsWithdrawals") or 0) if r else 0.0
+    except Exception as e:  # noqa: BLE001
+        return f"unavailable ({type(e).__name__})"
+    if put_in <= 0:
+        return "unavailable (no deposits in the IB inception statement)"
+    return f"{(net_liq / put_in - 1) * 100:+.2f}% (value ${net_liq:,.0f} vs ${put_in:,.0f} net deposited)"
 
 
 def open_assignments(options_path, today: str) -> list[str]:
@@ -467,7 +498,8 @@ def build() -> tuple[str, str]:
     pv_line = asg_block + (f"<p style='font-family:monospace;font-size:15px;margin:8px 0'>"
                f"<b>Total portfolio value:</b> <b style='color:#1a3c5e'>{pv_str}</b><br>"
                f"<b>Account TWR:</b> {twr_str}<br>"
-               f"<b>Since inception:</b> {itd_line()}</p>"
+               f"<b>Since inception, now:</b> {live_itd_line(net_liq)}<br>"
+               f"<b>Since inception:</b> {itd_line(today)}</p>"
                f"<p style='color:#64748b;font-size:11px;margin:4px 0'>Sleeves are shown in dollars; "
                f"any percentage is against the disclosed notional base in brackets "
                f"(docs/capital_bases.md). Use the account TWR for anything outside-facing.</p>"

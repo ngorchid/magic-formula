@@ -95,7 +95,8 @@ _hist = rec / "itd" / "twr_history.csv"
 
 def write_itd(*rows):
     with open(_hist, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["asof", "fromDate", "toDate", "twr", "bench_from", "bench_to", "bench_ret"])
+        w = csv.DictWriter(f, fieldnames=["asof", "fromDate", "toDate", "twr", "startingValue",
+                                          "depositsWithdrawals", "bench_from", "bench_to", "bench_ret"])
         w.writeheader()
         w.writerows(rows)
 
@@ -105,21 +106,49 @@ write_itd({"asof": "2026-10-09", "fromDate": "20260813", "toDate": "20261008", "
           {"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "1.459565",
            "bench_from": "20260813", "bench_to": "20261009", "bench_ret": "0.369221"})
 bs.RECORDS_DIR = rec
-il = safe(bs.itd_line)
-check("the latest row: account TWR vs S&P 500 TR and the difference in points",
-      il == "+1.46% (20260813–20261009, IBKR) vs S&P 500 TR +0.37% → +1.09 pp", il)
+il = safe(bs.itd_line, "2026-10-10")
+check("the latest row: account TWR vs S&P 500 TR and the difference in points, dates in words",
+      il == "+1.46% from 13 Aug 2026 to 9 Oct 2026 (IB statement, not yet including today) "
+            "vs S&P 500 TR +0.37% → +1.09 pp", il)
+il = safe(bs.itd_line, "2026-10-09")
+check("a statement that reaches today does not claim to exclude it",
+      isinstance(il, str) and il.startswith("+1.46% from 13 Aug 2026 to 9 Oct 2026 (IB statement) vs"), il)
 write_itd({"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "1.459565",
            "bench_from": "20260813", "bench_to": "20261008", "bench_ret": "0.2"})
-il = safe(bs.itd_line)
-check("a benchmark over different dates shows its own dates", "S&P 500 TR +0.20% (20260813–20261008)" in il, il)
+il = safe(bs.itd_line, "2026-10-10")
+check("a benchmark over different dates shows its own dates",
+      "S&P 500 TR +0.20% (13 Aug 2026 to 8 Oct 2026)" in il, il)
 write_itd({"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "-0.5",
            "bench_from": "", "bench_to": "", "bench_ret": ""})
-il = safe(bs.itd_line)
+il = safe(bs.itd_line, "2026-10-10")
 check("no benchmark -> the TWR alone and 'S&P 500: unavailable' (never 0%)",
-      il == "-0.50% (20260813–20261009, IBKR) vs S&P 500: unavailable", il)
+      il == "-0.50% from 13 Aug 2026 to 9 Oct 2026 (IB statement, not yet including today) "
+            "vs S&P 500: unavailable", il)
+
+print("\nSINCE INCEPTION, NOW (live value vs money in)")
+write_itd({"asof": "2026-10-14", "fromDate": "20260813", "toDate": "20261013", "twr": "1.451048",
+           "startingValue": "0", "depositsWithdrawals": "50000.0", "bench_ret": ""})
+ll = safe(bs.live_itd_line, 48_857.0)
+check("14 Oct: $48,857 against $50,000 deposited reads -2.29% (the email showed only +1.45%)",
+      ll == "-2.29% (value $48,857 vs $50,000 net deposited)", ll)
+write_itd({"asof": "2026-10-14", "fromDate": "20260813", "toDate": "20261013", "twr": "1.0",
+           "startingValue": "1000", "depositsWithdrawals": "49000", "bench_ret": ""})
+ll = safe(bs.live_itd_line, 51_000.0)
+check("the base is starting value PLUS net deposits", isinstance(ll, str) and ll.startswith("+2.00%"), ll)
+ll = safe(bs.live_itd_line, None)
+check("no account value -> unavailable", isinstance(ll, str) and ll.startswith("unavailable"), ll)
+write_itd({"asof": "2026-10-14", "fromDate": "20260813", "toDate": "20261013", "twr": "1.0", "bench_ret": ""})
+ll = safe(bs.live_itd_line, 48_857.0)
+check("no deposits in the statement -> unavailable, never a made-up base",
+      isinstance(ll, str) and ll.startswith("unavailable"), ll)
+bs.RECORDS_DIR = tmp / "missing"
+ll = safe(bs.live_itd_line, 48_857.0)
+check("no ITD history -> unavailable", isinstance(ll, str) and ll.startswith("unavailable"), ll)
+bs.RECORDS_DIR = rec
 write_itd({"asof": "2026-10-09", "fromDate": "20260813", "toDate": "20261008", "twr": "0.5",
            "bench_from": "20260813", "bench_to": "20261008", "bench_ret": "0.1"},
           {"asof": "2026-10-10", "fromDate": "20260813", "toDate": "20261009", "twr": "1.459565",
+           "startingValue": "0", "depositsWithdrawals": "50000",
            "bench_from": "20260813", "bench_to": "20261009", "bench_ret": "0.369221"})
 
 print("\nIN THE EMAIL")
@@ -134,7 +163,11 @@ body = _b[1] if isinstance(_b, tuple) else str(_b)
 check("the account TWR (IBKR) is the headline", "<b>Account TWR:</b> +1.25% (20260930–20261006, IBKR)" in body,
       re.findall(r"Account TWR[^<]*</b>[^<]*", body))
 check("the since-inception line is in the email",
-      "<b>Since inception:</b> +1.46% (20260813–20261009, IBKR) vs S&P 500 TR +0.37% → +1.09 pp" in body,
+      "<b>Since inception:</b> +1.46% from 13 Aug 2026 to 9 Oct 2026 (IB statement" in body
+      and "vs S&P 500 TR +0.37% → +1.09 pp" in body,
+      re.findall(r"Since inception[^<]*</b>[^<]*", body))
+check("the live since-inception line is in the email, from the same account value",
+      "<b>Since inception, now:</b> +0.20% (value $50,100 vs $50,000 net deposited)" in body,
       re.findall(r"Since inception[^<]*</b>[^<]*", body))
 check("the overlap line is in the email", "Names held by both sleeves: AAPL" in body, "")
 check("a sleeve percentage names its disclosed base",
