@@ -19,7 +19,7 @@ The Windows box already has the `bitbucket-picard` SSH alias (from the contract 
 
 ```bat
 cd C:\trading
-git clone git@bitbucket-picard:picard_capital/magic-formula.git
+git clone git@bitbucket-picard:gra_systematic/magic-formula.git
 cd magic-formula
 git checkout live
 ```

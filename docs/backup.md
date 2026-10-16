@@ -69,7 +69,7 @@ history) or the matching `daily\` zip.
 
 **Everything, on a new PC:**
 1. Install Python, Git, IB Gateway + IBC, 7-Zip; sign in to OneDrive.
-2. Clone the repos (Bitbucket `picard_capital/…`, branch `live`), create each `.venv`.
+2. Clone the repos (Bitbucket `gra_systematic/…`, branch `live`), create each `.venv`.
 3. `.env` files: open `TradingBackup\env\<latest>.7z` with 7-Zip and the password; each file is
    stored under its repo folder (`magic-formula-live\.env`, …) — extract into `PycharmProjects`.
 4. Copy each `TradingBackup\current\<repo>\results` back to `<repo>\results`,
