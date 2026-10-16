@@ -542,6 +542,59 @@ check("a currency difference is reported", "currency" in row("field_mismatch", "
 check("a VRP spread with leg conids + commission matches (2 x 1.30 = 2.60)",
       row("matched", "0002ee.v.02.01") != {}, str(table("exec_reconciliation")))
 
+print("\nLONDON LINES — pence vs pounds, stamp duty, IB's fractional FX (ITH.L, 2026-10-15)")
+M15 = "magic-formula:20261015-160002"
+fresh()
+put("20261009", "20261015", "".join([
+    # the real ITH.L execution: pounds, commission 3 + stamp duty 5.93572 in `taxes`
+    trade("00020f63.6ad10986.01.01", "ITHl", "596698209", M15, "BUY", 406, 2.924, comm="-3",
+          ccy="GBP", date="20261015").replace('notes=""', 'notes="IA" taxes="-5.93572"'),
+    # the same shape with the WRONG price in pounds (ledger 292.4p = 2.924, Flex 2.95)
+    trade("gbx.bad.01.01", "ITHl", "596698209", M15, "BUY", 10, 2.95, comm="-3",
+          ccy="GBP", date="20261015"),
+    # stamp duty missing from the ledger commission must still alert
+    trade("gbx.tax.01.01", "EDVl", "496837103", M15, "BUY", 22, 40.0, comm="-3",
+          ccy="GBP", date="20261015").replace('notes=""', 'notes="" taxes="-4.40"'),
+    # IB's own fractional remainder of the GBP sweep: FXFRAC, no tag, no order type
+    fx_row("FXFRAC01.000D648B.01.01", "GBP.USD", "USD", "-0.105740608", "1").replace(
+        'tradeDate="20261008"', 'tradeDate="20261015"'),
+    fx_row("FXFRAC01.big.01.01", "GBP.USD", "USD", "-500", "1").replace(
+        'tradeDate="20261008"', 'tradeDate="20261015"'),
+]), "2026-10-16T08:30:00")
+empty_ledgers()
+ledger("magic-formula", {"positions": [
+    {"ticker": "ITH.L", "shares": 406, "entry_price": 292.4, "entry_date": "2026-10-15",
+     "currency": "GBp", "entry_order_ref": M15, "entry_exec_ids": ["00020f63.6ad10986.01.01"],
+     "entry_conid": 596698209, "entry_commission": 8.9357},
+    {"ticker": "ITH.L", "shares": 10, "entry_price": 292.4, "entry_date": "2026-10-15",
+     "currency": "GBp", "entry_order_ref": M15, "entry_exec_ids": ["gbx.bad.01.01"],
+     "entry_conid": 596698209, "entry_commission": 3.0},
+    {"ticker": "EDV.L", "shares": 22, "entry_price": 4000.0, "entry_date": "2026-10-15",
+     "currency": "GBp", "entry_order_ref": M15, "entry_exec_ids": ["gbx.tax.01.01"],
+     "entry_conid": 496837103, "entry_commission": 3.0}],
+    "trade_log": []})
+warn, counts = run()
+check("ITH.L 2026-10-15 matches: 292.4 GBp = 2.924 GBP, commission 8.94 = 3.00 + stamp duty 5.94",
+      row("matched", "00020f63.6ad10986") != {}, str(row("field_mismatch", "00020f63.6ad10986")))
+check("a real price difference on a pence line still alerts, compared in pounds",
+      "price: ledger 2.924 vs Flex 2.95" in row("field_mismatch", "gbx.bad").get("detail", ""),
+      str(row("field_mismatch", "gbx.bad")))
+check("a ledger commission WITHOUT the stamp duty still alerts (3.00 vs 3.00 + 4.40)",
+      "commission: ledger 3.00 vs Flex 7.40" in row("field_mismatch", "gbx.tax").get("detail", ""),
+      str(row("field_mismatch", "gbx.tax")))
+check("the pence ledger is compared as GBP, not reported as a currency difference",
+      "currency" not in row("matched", "00020f63.6ad10986").get("detail", "")
+      and "currency" not in row("field_mismatch", "gbx.tax").get("detail", ""),
+      str(row("field_mismatch", "gbx.tax")))
+check("IB's FXFRAC remainder ($0.11) -> ib_auto_fx, not untagged",
+      row("ib_auto_fx", "FXFRAC01.000D648B") != {} and row("flex_untagged", "FXFRAC01.000D648B") == {},
+      str(table("exec_reconciliation")))
+check("...and a large FXFRAC row ($500) still alerts as untagged",
+      row("flex_untagged", "FXFRAC01.big") != {}, str(table("exec_reconciliation")))
+check("the trade-tag audit no longer counts the FXFRAC remainder (only the $500 one)",
+      any("1 trade(s) since 20261006 have no strategy tag" in w for w in d.audit_checks({}))
+      if hasattr(d, "audit_checks") else True, str(d.audit_checks({}) if hasattr(d, "audit_checks") else ""))
+
 print("\nHAND UNWIND — booked with options-vrp's book_hand_unwind.py, reconciled on its exec ids")
 HAND = "options-vrp:manual-20261009"
 hand_flex = (trade("h.s.01", "IWM", "9001", HAND, "SELL", 200, 254.10, date="20261009")

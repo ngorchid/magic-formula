@@ -654,6 +654,10 @@ def check_descriptions() -> list[str]:
 # CASH rows (DKK 3.82, EUR 0.58, GBP 1.41, NOK 2.23 bought against USD), exec ids FXSML..., no
 # order type, no order reference. Above AUTO_FX_MAX_USD the row still alerts as untagged.
 AUTO_FX_MAX_USD = 25.0
+# FXSML: small-balance conversions. FXFRAC: the fractional remainder of an FX order that IB fills
+# itself -- the magic-formula sweep bought GBP 1,196 for a GBP 1,196.07972 need and IB converted
+# the GBP 0.07972 ($0.11) as FXFRAC01.000D648B.01.01, untagged (first seen 2026-10-15).
+AUTO_FX_PREFIXES = ("FXSML", "FXFRAC")
 LINKED_FROM = "20261006"          # first day orders carried a tag and ledgers kept exec ids
 AGEING_DAYS = 3                   # a ledger id still not covered by any statement after this
                                   # many business days alerts (IB lag is normally one day)
@@ -726,6 +730,12 @@ def _ledger_fills() -> tuple[list[dict], list[str]]:
                              t.get("exit_exec_ids") or [], _conids(t, "conid"),
                              t.get("exit_commission"), t.get("currency")))
             for side, tk, qty, px, dt, ref, ids, cids, comm, ccy in legs:
+                # London lines are quoted in PENCE (yfinance's GBp, which the ledger keeps); IB
+                # trades and reports them in POUNDS. Same price, 100x apart: compare in pounds.
+                # First seen on ITH.L 2026-10-15 (ledger 292.4 GBp vs Flex 2.924 GBP).
+                if ccy == "GBp":
+                    px = float(px) / 100.0 if px not in (None, "") else px
+                    ccy = "GBP"
                 fills.append({"sleeve": sleeve, "date": _iso8(dt), "order_ref": ref,
                               "exec_ids": list(ids), "kind": "STK", "price": px,
                               "legs": [{"key": ("STK", _stk_root(tk)), "side": side,
@@ -861,9 +871,10 @@ def _combo_level_ids_ok(missing: list[str], found: list[dict], leg_keys: set) ->
 
 def _is_ib_auto_fx(e: dict) -> bool:
     """IB's own conversion of a small foreign-currency balance (see AUTO_FX_MAX_USD): CASH, exec id
-    FXSML..., no order type, no order reference, and worth at most AUTO_FX_MAX_USD."""
+    FXSML... or FXFRAC... (AUTO_FX_PREFIXES), no order type, no order reference, and worth at most AUTO_FX_MAX_USD."""
     if (e.get("assetCategory") != "CASH" or e.get("orderReference") or e.get("orderType")
-            or not (e.get("ibExecID") or "").startswith("FXSML") or e.get("proceeds") in (None, "")):
+            or not (e.get("ibExecID") or "").startswith(AUTO_FX_PREFIXES)
+            or e.get("proceeds") in (None, "")):
         return False
     return abs(float(e["proceeds"]) * float(e.get("fxRateToBase") or 1)) <= AUTO_FX_MAX_USD
 
@@ -908,7 +919,11 @@ def _compare(fill: dict, execs: list[dict]) -> list[str]:
         keyf = lambda e: ("CONID", str(e.get("conid")))  # noqa: E731
     extra = []                    # commission / currency: reported alongside, never instead of
     if fill.get("commission") not in (None, ""):
-        flex_comm = sum(abs(float(e.get("ibCommission") or 0)) for e in execs)
+        # The ledger keeps the API's CommissionReport, which INCLUDES transaction taxes (UK stamp
+        # duty 0.5% on buys, FTT); Flex splits them into `taxes`. ITH.L 2026-10-15: ledger 8.94 =
+        # Flex ibCommission 3.00 + taxes 5.94. Compare like with like.
+        flex_comm = sum(abs(float(e.get("ibCommission") or 0)) + abs(float(e.get("taxes") or 0))
+                        for e in execs)
         if abs(flex_comm - abs(float(fill["commission"]))) > 0.02:
             extra.append(f"commission: ledger {abs(float(fill['commission'])):.2f} vs Flex {flex_comm:.2f}")
     if fill.get("currency") and any(e.get("currency") and e.get("currency") != fill["currency"]

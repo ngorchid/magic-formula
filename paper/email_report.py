@@ -47,9 +47,50 @@ def _table(headers, rows) -> str:
     return f"<table style='border-collapse:collapse;font-family:monospace;font-size:13px'>{th and '<tr>'+th+'</tr>'}{trs}</table>"
 
 
+def _trades_section(state: PortfolioState, trades: dict | None, today: str) -> str:
+    """Today's sells, buys, clock restarts and FX sweeps, from run_daily's summary.
+
+    Before 2026-10-16 the email showed only the resulting portfolio, so a rotation (MNST sold,
+    ITH.L bought on 2026-10-15) was visible only as a changed table row. Sells come from the
+    trade log (fill price, realized P/L, reason), buys from the new positions (fill price, USD
+    cost). `trades` None means the summary is unavailable -- said so, never shown as "no trades".
+    """
+    if trades is None:
+        return "<p style='font-family:monospace;font-size:13px'>Trades today: unavailable</p>"
+    sold = [r for r in state.trade_log
+            if r.get("exit_date") == today and r.get("ticker") in set(trades.get("sells") or [])]
+    rows = []
+    for r in sold:
+        col = "#1a7f37" if r["pnl_usd"] >= 0 else "#b91c1c"
+        rows.append(("SELL", r["ticker"], f"{r['shares']:g}",
+                     f"{r['exit_price']:.2f} {r['currency']}",
+                     f"${r['shares'] * r['exit_price'] * r['exit_fx']:,.0f}",
+                     f"<span style='color:{col}'>${r['pnl_usd']:+,.0f}</span> realized",
+                     r.get("reason", "")))
+    for b in trades.get("buys") or []:
+        t, n, usd = b[0], b[1], b[2]
+        p = state.get(t)
+        price = f"{p.entry_price:.2f} {p.currency}" if p else "—"
+        rows.append(("BUY", t, f"{n:g}", price, f"${usd:,.0f}", "", "new top-30 name"))
+    holds = trades.get("holds") or []
+    sweeps = trades.get("fx_sweep") or []
+    if not rows and not holds and not sweeps:
+        return "<p style='font-family:monospace;font-size:13px'>Trades today: none</p>"
+    out = ("<h3 style='color:#1a3c5e'>Today's trades</h3>"
+           + (_table(["Side", "Ticker", "Shares", "Fill", "USD", "P/L", "Why"], rows) if rows
+              else "<p style='font-family:monospace;font-size:13px'>No buys or sells.</p>"))
+    if holds:
+        out += (f"<p style='font-family:monospace;font-size:13px;margin:6px 0'>Held through "
+                f"(21-day clock up, still in the top 45, clock restarted): {', '.join(holds)}</p>")
+    if sweeps:
+        out += ("<p style='font-family:monospace;font-size:13px;margin:6px 0'>FX sweep: "
+                + ", ".join(f"{c} {u:+,.0f} ({s})" for c, u, s in sweeps) + "</p>")
+    return out
+
+
 def build_email_body(state: PortfolioState, marks: dict, fx: dict,
                      spy_day_ret: float | None, spy_incep_ret: float | None,
-                     today: str) -> str:
+                     today: str, trades: dict | None = None) -> str:
     unreal = state.unrealized_pnl(marks, fx)
     nav = state.nav(marks, fx)
     total_ret = nav / state.inception_nav - 1 if state.inception_nav else None
@@ -109,6 +150,7 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
     return f"""<html><body style='font-family:sans-serif;color:#1e293b'>
     <h2 style='color:#1a3c5e'>Magic Formula {label} — {today}</h2>
     {summary}
+    {_trades_section(state, trades, today)}
     <h3 style='color:#1a3c5e'>Portfolio</h3>
     {port_tbl}
     <p style='color:#64748b;font-size:11px;margin-top:14px'>US + Europe, ≥$500M, enhanced Magic Formula (Graham off, inverse-vol, 25% vol-target). {caveat}</p>
@@ -118,12 +160,12 @@ def build_email_body(state: PortfolioState, marks: dict, fx: dict,
 
 def send_report(state: PortfolioState, marks: dict, fx: dict,
                 spy_day_ret, spy_incep_ret, today: str, dry_run: bool = False,
-                alerts=None) -> str:
+                alerts=None, trades: dict | None = None) -> str:
     """`alerts` is an AlertCollector. Its records go at the TOP of the body and, crucially, a
     marker goes in the SUBJECT — the whole point is that a guard firing is visible without
     opening anything. Warnings previously went only to results/paper/run.log, which nobody
     reads daily, so an alert that fired was indistinguishable from one that never did."""
-    body = build_email_body(state, marks, fx, spy_day_ret, spy_incep_ret, today)
+    body = build_email_body(state, marks, fx, spy_day_ret, spy_incep_ret, today, trades=trades)
     if alerts is not None and getattr(alerts, "records", None):
         body = alerts.html() + body
     nav = state.nav(marks, fx)
@@ -131,7 +173,11 @@ def send_report(state: PortfolioState, marks: dict, fx: dict,
     mark = ""
     if alerts is not None and getattr(alerts, "worst", None):
         mark = f"[{alerts.worst} x{len(alerts.records)}] "
-    subject = f"{mark}Magic Formula {os.getenv('BOOK_LABEL', 'Paper')} — {today}: NAV ${nav:,.0f} ({total_ret*100:+.1f}%)"
+    traded = ""
+    if trades and (trades.get("buys") or trades.get("sells")):
+        traded = f" · {len(trades.get('buys') or [])} bought, {len(trades.get('sells') or [])} sold"
+    subject = (f"{mark}Magic Formula {os.getenv('BOOK_LABEL', 'Paper')} — {today}: "
+               f"NAV ${nav:,.0f} ({total_ret*100:+.1f}%){traded}")
 
     user, pw, to = os.getenv("EMAIL_USER"), os.getenv("EMAIL_PASS"), os.getenv("TO_EMAIL")
     if dry_run or not all([user, pw, to]):

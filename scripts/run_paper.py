@@ -493,7 +493,7 @@ def main(dry_run: bool = False, force: bool = False) -> None:
     if _note:
         logging.warning("heartbeat: %s", _note)
     body = send_report(state, marks, fx, spy_day, spy_incep, today, dry_run=dry_run,
-                       alerts=ALERTS)
+                       alerts=ALERTS, trades=summary)
     # Out-of-band push, AFTER the email attempt so an SMTP failure is itself in what gets pushed.
     # The email cannot report its own failure; this is the only channel that can.
     if not dry_run:
