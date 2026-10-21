@@ -8,11 +8,15 @@ WHAT (active sleeves only, owner's choice):
   magic-formula-live/results (minus panels.pkl, a self-rebuilding 37 MB price cache) and /logs,
   trend-overlay-live/results, options-vrp-live/results, substitute-pairs/results +
   book_equity.json, the shared PycharmProjects/book_equity.json, and C:/Users/Nicolas/IB-records.
+  Plus auction-recorder/results (the closing-auction recordings), in current/ only -- see below.
 
 WHERE: %OneDrive%/TradingBackup (BACKUP_DIR overrides)
   current/<source>/...      latest copy. ADDITIVE: a file deleted or emptied on the PC is never
                             deleted from here (OneDrive's version history keeps older versions).
-  daily/YYYY-MM-DD.zip      dated snapshot of everything above, kept KEEP_DAYS days.
+  current/auction-recorder/results/.../<file>.zip
+                            the ARCHIVE_ONLY sources: one zip per file, also additive. NOT in
+                            the daily snapshot (a growing, write-once dataset; see ARCHIVE_ONLY).
+  daily/YYYY-MM-DD.zip      dated snapshot of everything above except ARCHIVE_ONLY, kept KEEP_DAYS days.
   env/YYYY-MM-DD.7z         the four .env files (credentials), AES-256 with encrypted file names
                             (7-Zip). The password is stored DPAPI-encrypted for this Windows user
                             only (set it with scripts/set_backup_password.ps1); without it this
@@ -76,6 +80,14 @@ SOURCES = [
     ("book_equity.json", PROJECTS / "book_equity.json"),
     ("IB-records", Path(os.getenv("IB_RECORDS_DIR", r"C:\Users\Nicolas\IB-records"))),
 ]
+# Copied into current/ ONLY, each file as its own .zip, and kept OUT of the daily snapshot. The
+# closing-auction recordings (added 2026-10-21) are ~1.8 MB of CSV a day, never change once written
+# and cannot be re-downloaded (no free history of the feed exists). In the daily snapshot every
+# zip would carry the whole growing set (~15 GB over the 365 kept zips by year end); zipped once
+# each they cost ~310 KB a day (~80 MB a year).
+ARCHIVE_ONLY = [
+    ("auction-recorder/results", PROJECTS / "auction-recorder" / "results"),
+]
 ENV_FILES = [PROJECTS / r / ".env" for r in
              ("magic-formula-live", "trend-overlay-live", "options-vrp-live", "substitute-pairs")]
 
@@ -116,6 +128,55 @@ def copy_current(problems: list[str]) -> int:
                 n += 1
             except OSError as e:          # a file locked mid-write: report, keep going
                 problems.append(f"could not copy {p}: {e}")
+    return n
+
+
+def _zipped_matches(dst: Path, st: os.stat_result) -> bool:
+    """Is `dst` (a one-file zip) already the zipped copy of a file with stat `st`? Same rule as
+    copy_current -- size AND mtime -- with the size read from the zip entry (the zip's own size
+    differs by design)."""
+    try:
+        if int(dst.stat().st_mtime) != int(st.st_mtime):
+            return False
+        with zipfile.ZipFile(dst) as z:
+            infos = z.infolist()
+        return len(infos) == 1 and infos[0].file_size == st.st_size
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def copy_archive(problems: list[str]) -> int:
+    """ARCHIVE_ONLY sources into current/<name>/<path>.zip, one verified zip per file.
+
+    Additive like copy_current: a new or changed file is zipped, nothing is ever deleted. The zip
+    takes the source's mtime, which is how an unchanged file is recognised on the next run."""
+    n = 0
+    for name, src in ARCHIVE_ONLY:
+        if not src.exists():
+            problems.append(f"source missing: {name} ({src})")
+            continue
+        base = DEST / "current" / name
+        for p, rel in _files(src):
+            dst = base / rel.parent / (rel.name + ".zip")
+            try:
+                st = p.stat()
+                if _zipped_matches(dst, st):
+                    continue
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dst.with_name(dst.name + ".partial")
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                    z.write(p, p.name)
+                with zipfile.ZipFile(tmp) as z:
+                    bad = z.testzip()
+                if bad:
+                    problems.append(f"zipped copy of {p} failed its CRC test")
+                    tmp.unlink(missing_ok=True)
+                    continue
+                os.replace(tmp, dst)
+                os.utime(dst, (st.st_atime, st.st_mtime))
+                n += 1
+            except OSError as e:          # a file locked mid-write: report, keep going
+                problems.append(f"could not zip {p}: {e}")
     return n
 
 
@@ -258,11 +319,12 @@ def main() -> int:
             return default
 
     n = step("copy", lambda: copy_current(problems), 0)
+    a = step("zipped copy", lambda: copy_archive(problems), 0)
     z = step("daily snapshot", lambda: daily_zip(today, problems), None)
     e = step("env archive", lambda: env_archive(today, problems), None)
     pruned = step("prune", lambda: prune(today), 0)
     snap = f"{z.name} ({z.stat().st_size / 1024:,.0f} KB)" if z else "NONE"
-    log(f"current/: {n} file(s) updated | daily: {snap}")
+    log(f"current/: {n} file(s) updated, {a} zipped | daily: {snap}")
     log(f"env: {e.name if e else 'NONE'} | pruned {pruned} old archive(s) | dest {DEST}")
     for pr in problems:
         log(f"PROBLEM: {pr}")

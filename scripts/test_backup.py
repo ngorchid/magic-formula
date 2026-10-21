@@ -52,6 +52,12 @@ w(PROJ / "trend-overlay-live" / "results" / "env_notes.envelope", "ok")
 w(PROJ / "substitute-pairs" / "book_equity.json", '{"pairs": 1}')
 w(PROJ / "book_equity.json", '{"book": 1}')
 w(IBR / "raw" / "2026" / "flex.xml", "<FlexQueryResponse/>")
+# The auction recorder's output: a write-once, compressible daily CSV (ARCHIVE_ONLY: zipped, current/ only).
+AUC = PROJ / "auction-recorder" / "results" / "auction"
+AUC_ROW = "2026-10-20T15:59:57-04:00,AMZN,NASDAQ,6275429.0,262.27,-38717.0,0.0,262.40,262.38,262.43\n"
+w(AUC / "2026-10-20.csv", "ts,symbol,exchange,auctionVolume,auctionPrice,auctionImbalance\n" + AUC_ROW * 2000)
+w(AUC / "2026-10-20_meta.json", '{"group": 2}')
+w(PROJ / "auction-recorder" / "results" / ".env.bak", "FLEX_TOKEN=plain-text-secret\n")
 os.environ.update(PROJECTS_DIR=str(PROJ), BACKUP_DIR=str(DEST), IB_RECORDS_DIR=str(IBR),
                   BACKUP_PASSWORD_FILE=str(PWFILE), SEVEN_ZIP=str(SEVEN), BACKUP_HEARTBEAT_URL="")
 
@@ -125,6 +131,71 @@ check("a file DELETED on the PC is NOT deleted from the backup",
       (CUR / "options-vrp-live/results/paper/state.json").exists(), "")
 w(PROJ / "options-vrp-live" / "results" / "paper" / "state.json", '{"repo": "options-vrp-live"}')
 
+print("\nZIPPED COPY — auction recordings (current/ only, one zip per file)")
+ZAUC = CUR / "auction-recorder" / "results" / "auction"
+
+
+def zread(p: Path, member: str) -> bytes | None:
+    """One member of a zip, or None if the zip or the member is missing (a check, not a crash)."""
+    try:
+        with zipfile.ZipFile(p) as z:
+            return z.read(member)
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+csv_src, csv_zip = AUC / "2026-10-20.csv", ZAUC / "2026-10-20.csv.zip"
+check("copy_current alone does NOT copy them in plain form",
+      not (CUR / "auction-recorder").exists(), str(list(CUR.glob("auction-recorder/**/*"))))
+probs = []
+na = b.copy_archive(probs)
+check("each file lands as <name>.zip under its source name, no problems",
+      na == 2 and csv_zip.exists() and (ZAUC / "2026-10-20_meta.json.zip").exists() and probs == [],
+      f"n={na} {probs} {list(ZAUC.glob('*')) if ZAUC.exists() else ''}")
+zi = zipfile.ZipFile(csv_zip).namelist() if csv_zip.exists() else []
+check("...holding exactly that file, byte-identical, under its own name",
+      zi == ["2026-10-20.csv"] and zread(csv_zip, "2026-10-20.csv") == csv_src.read_bytes(), str(zi))
+check("...COMPRESSED (the point: ~5x smaller than the CSV)",
+      csv_zip.exists() and csv_zip.stat().st_size * 5 < csv_src.stat().st_size,
+      f"{csv_zip.stat().st_size if csv_zip.exists() else '-'} vs {csv_src.stat().st_size}")
+check("no plain copy and no half-written .partial next to the zips",
+      not (ZAUC / "2026-10-20.csv").exists() and not list(ZAUC.glob("*.partial")), str(list(ZAUC.glob("*"))))
+check("a .env copy in the recorder's folder is NOT zipped either",
+      not list((CUR / "auction-recorder").rglob(".env*")), str(list((CUR / "auction-recorder").rglob("*"))))
+check("a second run zips nothing unchanged", b.copy_archive([]) == 0, "")
+w(csv_src, csv_src.read_text().replace("AMZN", "AMZX"))                   # same size, new content
+os.utime(csv_src, (csv_src.stat().st_atime, csv_src.stat().st_mtime + 5))
+b.copy_archive([])
+check("a changed file is zipped again (mtime counts)",
+      b"AMZX" in (zread(csv_zip, "2026-10-20.csv") or b""), "")
+mt = csv_src.stat().st_mtime
+w(csv_src, csv_src.read_text() + AUC_ROW)                                 # longer, SAME mtime
+os.utime(csv_src, (mt, mt))
+b.copy_archive([])
+check("a changed file with the SAME mtime is zipped again too (size counts)",
+      zread(csv_zip, "2026-10-20.csv") == csv_src.read_bytes(), "")
+saved, saved_st = csv_src.read_bytes(), csv_src.stat()
+csv_src.unlink()
+b.copy_archive([])
+check("a file DELETED on the PC keeps its zip in the backup", csv_zip.exists(), "")
+csv_src.write_bytes(saved)
+os.utime(csv_src, (saved_st.st_atime, saved_st.st_mtime))             # restored as it was
+(PROJ / "auction-recorder" / "results").rename(PROJ / "auction-recorder" / "results.away")
+probs = []
+b.copy_archive(probs)
+check("a missing source is reported", any("auction-recorder/results" in p for p in probs), str(probs))
+(PROJ / "auction-recorder" / "results.away").rename(PROJ / "auction-recorder" / "results")
+_real_testzip = zipfile.ZipFile.testzip
+zipfile.ZipFile.testzip = lambda self: "2026-10-21.csv"                   # corrupt
+w(AUC / "2026-10-21.csv", "ts\n")
+probs = []
+b.copy_archive(probs)
+zipfile.ZipFile.testzip = _real_testzip
+check("a zip failing its CRC test is REPORTED and not kept (retried next night)",
+      any("CRC" in p for p in probs) and not (ZAUC / "2026-10-21.csv.zip").exists()
+      and not list(ZAUC.glob("*.partial")), str(probs))
+check("...and the next run zips it", b.copy_archive([]) == 1 and (ZAUC / "2026-10-21.csv.zip").exists(), "")
+
 print("\nDAILY SNAPSHOT")
 z = b.daily_zip(TODAY, probs)
 names = zipfile.ZipFile(z).namelist() if z else []
@@ -133,6 +204,8 @@ check("contains every source under its backup name",
       "magic-formula-live/results/paper/state.json" in names and "IB-records/raw/2026/flex.xml" in names
       and "book_equity.json" in names and "substitute-pairs/book_equity.json" in names, str(names))
 check("the price cache is NOT in the snapshot", not any("panels.pkl" in x for x in names), str(names))
+check("the auction recordings are NOT in the snapshot (current/ only)",
+      z is not None and not any("auction" in x for x in names), str([x for x in names if "auction" in x]))
 check("NO .env copy is in the snapshot, in plain text or otherwise",
       z is not None and not any(x in names for x in ENV_COPIES)
       and not any(b"plain-text-secret" in zipfile.ZipFile(z).read(x) for x in names), str(names))
@@ -202,9 +275,11 @@ check("the window is a year", b.KEEP_DAYS == 365, str(b.KEEP_DAYS))
 
 print("\nMAIN — alerts and heartbeat")
 ALERTS.clear(); PINGS.clear()
+w(AUC / "2026-10-22.csv", "ts\n")
 rc = b.main()
 check("a complete run returns 0, sends NO alert and pings the heartbeat",
       rc == 0 and ALERTS == [] and PINGS == [1], f"rc={rc} alerts={ALERTS} pings={PINGS}")
+check("...and the nightly run zips a new recording", (ZAUC / "2026-10-22.csv.zip").exists(), "")
 (PROJ / "trend-overlay-live" / "results").rename(PROJ / "trend-overlay-live" / "results.away")
 ALERTS.clear(); PINGS.clear()
 rc = b.main()

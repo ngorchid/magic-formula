@@ -13,6 +13,7 @@ encrypted archive). Script: `scripts/backup_to_onedrive.py`; task `TradingBackup
 | `substitute-pairs\results` + `book_equity.json` | the paper sleeve's book |
 | `PycharmProjects\book_equity.json` | the shared book-equity file behind the book-level drawdown check |
 | `C:\Users\Nicolas\IB-records` | the as-reported IB audit trail (raw XML + manifest) |
+| `auction-recorder\results` | the closing-auction recordings: no free history of the feed exists, so they cannot be re-downloaded. **`current\` only, one `.zip` per file** (below) |
 | the four live `.env` files | credentials — **encrypted** (below) |
 
 Not backed up: the code (it is in Bitbucket), caches, the retired paper checkouts. **Never in plain
@@ -35,9 +36,17 @@ Repeat it after any change to what is backed up.
 current\<source>\...      latest copy. ADDITIVE: nothing is ever deleted here, so a file
                           deleted or wiped on the PC survives; OneDrive version history keeps
                           the earlier versions of each file.
-daily\YYYY-MM-DD.zip      snapshot of everything, one per night (reruns: _2, _3), kept 365 days
+current\auction-recorder\results\auction\<file>.zip
+                          the auction recordings, one zip per file, also additive
+daily\YYYY-MM-DD.zip      snapshot of everything EXCEPT the auction recordings, one per night
+                          (reruns: _2, _3), kept 365 days
 env\YYYY-MM-DD.7z         the .env files, AES-256 with encrypted file names, kept 365 days
 ```
+
+Why the auction recordings are handled apart (2026-10-21): about 1.8 MB of CSV a day (84 names),
+written once and never changed. In the daily snapshot every zip would carry the whole growing set,
+about 15 GB over the 365 kept zips by the end of a year. Zipped once each they take about 310 KB a
+day, roughly 80 MB a year. A file is zipped again only if its size or modification time changes.
 
 Every archive is verified after writing (zip CRC test; 7z test with the password). Any problem —
 a missing source, a failed archive, no password set, OneDrive folder missing — is logged and
@@ -74,5 +83,7 @@ history) or the matching `daily\` zip.
    stored under its repo folder (`magic-formula-live\.env`, …) — extract into `PycharmProjects`.
 4. Copy each `TradingBackup\current\<repo>\results` back to `<repo>\results`,
    `current\IB-records` to `C:\Users\Nicolas\IB-records`, and the two `book_equity.json` files.
+   The auction recordings: extract every `current\auction-recorder\results\auction\*.zip` into
+   `auction-recorder\results\auction` (in Explorer: select all > right-click > 7-Zip > Extract Here).
 5. Recreate the scheduled tasks (see each repo's docs) and run each sleeve's tests before the first
    live run.
