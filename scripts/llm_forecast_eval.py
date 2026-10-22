@@ -17,7 +17,8 @@ For every forecast row (status OK, p_up given) in ~/aktien/trading/llm-forecasts
 Scored per prompt version: hit rate of the forecast direction (p_up above or below 0.50; exactly
 0.50 counts as no view), a binomial test against 50%, the Brier score against always saying 0.50
 (0.25), and the return from trading the sign, gross and net of ~6bp a round trip, with a t-statistic
-clustered by reaction day. Also by confidence. Only the earliest forecast per company and release
+clustered by reaction day (shown from 5 reaction days on). Ranking, independent of the range of
+p_up: AUC, Spearman correlation and the top-minus-bottom-third spread. Also by confidence. Only the earliest forecast per company and release
 counts. Rows still waiting for a release or a price are
 reported as PENDING, not scored.
 
@@ -77,7 +78,11 @@ def reaction_day(acc: pd.Timestamp, cal: pd.DatetimeIndex) -> int | None:
     return int(i) if i < len(cal) else None
 
 
-def t_clustered(x: pd.Series, day: pd.Series) -> float:
+def t_clustered(x: pd.Series, day: pd.Series, min_clusters: int = 5) -> float:
+    """NaN below `min_clusters` reaction days: with one day the deviations sum to zero by
+    construction, so the standard error is ~1e-19 and the t-statistic explodes."""
+    if day.nunique() < min_clusters:
+        return float("nan")
     dev = (x - x.mean()).groupby(day.values).sum()
     se = math.sqrt((dev ** 2).sum()) / len(x)
     return x.mean() / se if se > 0 else float("nan")
@@ -148,6 +153,36 @@ def score(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def ranking(p: pd.Series, reaction: pd.Series) -> dict:
+    """Does a higher p_up go with a better reaction? Independent of the RANGE of p_up, so it reads
+    the information in forecasts that all sit near 0.50.
+
+    auc: chance that a random beater got a higher p_up than a random laggard (ties count half;
+         0.50 = no skill), with a naive two-sided p-value (Mann-Whitney normal approximation,
+         ignores clustering by day).
+    spearman: rank correlation of p_up with the reaction.
+    tercile spread: mean reaction of the top third by p_up minus the bottom third (ties share
+         their average rank), gross and net of a round trip on each leg.
+    """
+    up = reaction > 0
+    n1, n0 = int(up.sum()), int((~up).sum())
+    out = {"auc": float("nan"), "auc_p": float("nan"), "spearman": float("nan"),
+           "spread": float("nan"), "n_tercile": 0}
+    if n1 and n0:
+        r = p.rank(method="average")
+        out["auc"] = (r[up].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+        se = math.sqrt((n1 + n0 + 1) / (12 * n1 * n0))
+        out["auc_p"] = math.erfc(abs(out["auc"] - 0.5) / se / math.sqrt(2))
+    if len(p) >= 3 and p.nunique() > 1:
+        out["spearman"] = float(p.rank().corr(reaction.rank()))
+    pct = p.rank(method="average", pct=True)
+    top, bot = reaction[pct > 2 / 3], reaction[pct <= 1 / 3]
+    if len(top) >= 3 and len(bot) >= 3:
+        out["spread"] = top.mean() - bot.mean()
+        out["n_tercile"] = min(len(top), len(bot))
+    return out
+
+
 def report(df: pd.DataFrame) -> None:
     print("evaluation status:", df["eval_status"].value_counts().to_dict())
     s = df[(df["eval_status"] == "VALID") & df["reaction"].notna()].copy()
@@ -168,6 +203,12 @@ def report(df: pd.DataFrame) -> None:
         if len(view) >= 3:
             print(f"  trading the sign: gross {ret.mean() * 1e4:+.1f}bp, net {net.mean() * 1e4:+.1f}bp per event, "
                   f"t {t_clustered(net, view['reaction_day']):+.2f}")
+        rk = ranking(g["p_up"], g["reaction"])
+        print(f"  ranking (all {len(g)}, range-free): AUC {rk['auc']:.3f} (0.50 = no skill, naive p {rk['auc_p']:.3f}), "
+              f"Spearman {rk['spearman']:+.3f}")
+        if rk["n_tercile"]:
+            print(f"  top-minus-bottom third by p_up: gross {rk['spread'] * 1e4:+.1f}bp, "
+                  f"net {(rk['spread'] - 2 * COST) * 1e4:+.1f}bp (>= {rk['n_tercile']} names a side)")
         for c, gc in view.groupby("confidence"):
             h = (np.sign(gc["reaction"]) == gc["dir"]).mean()
             print(f"    confidence {c:7}: n {len(gc):4d}  hit {h:.1%}  net {(gc['dir'] * gc['reaction'] - COST).mean() * 1e4:+.1f}bp")
