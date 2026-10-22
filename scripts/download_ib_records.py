@@ -220,6 +220,8 @@ def _split_ref(ref: str) -> tuple[str, str]:
 #                                        balances)
 #   interest in the BASE currency     -> book    (the shared USD pool belongs to no sleeve)
 #   market-data subscription fees     -> options-vrp (OPRA exists for it)
+#   NYSE order-imbalance feed         -> book    (auction recorder: research, no sleeve;
+#                                        owner's rule 2026-10-22)
 #   other account fees                -> book
 #   deposits / withdrawals            -> capital (flows, not P&L)
 #   anything else                     -> unassigned -> audit alert
@@ -228,6 +230,12 @@ ASSET_SLEEVE = {"STK": "magic-formula", "CASH": "magic-formula", "FUT": "trend-o
                 "OPT": "options-vrp", "BAG": "options-vrp"}
 MARKET_DATA_WORDS = ("OPRA", "SNAPSHOT", "MARKET DATA", "TOP OF BOOK", "BUNDLE", "NETWORK A",
                      "NETWORK B", "NETWORK C", "NP,L1", "NON-PROFESSIONAL")
+# Market data that serves no sleeve -> book, checked BEFORE MARKET_DATA_WORDS. The NYSE order-
+# imbalance feed (subscribed 2026-10-20) is for the auction recorder, a read-only research tool.
+# IB words the one charge two ways -- "...IMBALANCES NP FOR OCT 2026" (cash transactions) and
+# "...IMBALANCES Non-Professional for Oct 2026" (statement of funds, and its VAT) -- and the second
+# matched "NON-PROFESSIONAL", so the same fee was split between book and options-vrp (2026-10-22).
+BOOK_DATA_WORDS = ("IMBALANCE",)
 SYEP_WORDS = ("SYEP", "MANAGED SECURITIES", "SECURITIES LENT", "LENDING")
 CASH_TYPE_CATEGORY = {
     "Dividends": "dividend", "Payment In Lieu Of Dividends": "dividend",
@@ -352,7 +360,10 @@ def attribute(row: dict, category: str, owners: dict[str, str], base: str,
     if category == "fx_translation":
         return "magic-formula"            # revaluation of the foreign balances its trades create
     if category in ("fee", "sales_tax") and not row.get("conid"):
-        # VAT on a fee goes where the fee goes: market data -> options-vrp, any other -> book.
+        # VAT on a fee goes where the fee goes: market data -> options-vrp, any other -> book;
+        # the research-only imbalance feed -> book, whatever IB's wording.
+        if any(w in desc for w in BOOK_DATA_WORDS):
+            return "book"
         return "options-vrp" if any(w in desc for w in MARKET_DATA_WORDS) else "book"
     if row.get("conid") or row.get("assetCategory"):
         return _instrument_sleeve(row, owners, delivered)

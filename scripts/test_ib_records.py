@@ -167,6 +167,8 @@ inner = "".join([
     cash(21, "Other Fees", "-1.00", "ACTIVITY FEE"),
     cash(22, "Deposits/Withdrawals", "1000", "CASH RECEIPTS"),
     cash(23, "Price Adjustments", "0.10", "SOMETHING NEW"),
+    # The NYSE imbalance feed (auction recorder, research) -> book; IB's real wordings, 2026-10-21
+    cash(24, "Other Fees", "-1", "N******05:NYSE ORDER IMBALANCES NP FOR OCT 2026"),
     sof(30, "ADJ", "-322", "MCL NOV26 Position MTM", conid="661016596", cat="FUT"),
     sof(31, "ADJ", "-0.004", "FX Translations P&L"),
     sof(32, "ADJ", "5", "STOCK ADJUSTMENT", conid="265598", cat="STK"),
@@ -174,6 +176,8 @@ inner = "".join([
     # VAT on fees (code STAX, seen live 2026-10-07): follows the fee it is charged on
     sof(34, "STAX", "-0.38", "VAT n******05:US Equity and Options Add-On Streaming Bundle Non-Professional"),
     sof(35, "STAX", "-0.21", "VAT n******05:ACTIVITY FEE"),
+    sof(36, "OFEE", "-1", "n******05:NYSE ORDER IMBALANCES Non-Professional for Oct 2026"),
+    sof(37, "STAX", "-0.081", "VAT n******05:NYSE ORDER IMBALANCES Non-Professional "),
 ])
 with _At("2026-10-07T08:30:00"):
     d.archive(stmt("20261001", "20261007", inner), "999")
@@ -217,6 +221,10 @@ check("VAT (STAX) on the market-data bundle -> options-vrp, category sales_tax",
       vat_md.get("sleeve") == "options-vrp" and vat_md.get("category") == "sales_tax", str(vat_md))
 check("VAT (STAX) on any other fee -> book", vat_other.get("sleeve") == "book"
       and vat_other.get("category") == "sales_tax", str(vat_other))
+imb = [by(sf, "transactionID", "36"), by(sf, "transactionID", "37")]
+check("NYSE imbalance feed -> book in BOTH of IB's wordings, and its VAT too (not options-vrp)",
+      sl(24) == "book" and [r.get("sleeve") for r in imb] == ["book", "book"]
+      and imb[1].get("category") == "sales_tax", f"{sl(24)} {[r.get('sleeve') for r in imb]}")
 summ = table("attribution_summary")
 check("attribution_summary totals the ledger by sleeve x category",
       any(r["sleeve"] == "trend-overlay" and r["category"] == "futures_mtm"
