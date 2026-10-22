@@ -208,8 +208,12 @@ try:
            ib_symbol_candidates("RYA.IR")[0] == "RY4C", str(ib_symbol_candidates("RYA.IR")))
 finally:
     _b.IB_SYMBOL_FIX.pop("RYA.IR", None)
-expect("IB_SYMBOL_FIX ships EMPTY (entries must be verified against live IB first)",
-       IB_SYMBOL_FIX == {}, str(IB_SYMBOL_FIX))
+# Only entries VERIFIED against live IB (scripts/ib_symbol_probe.py + ISIN). A new one must be
+# added here deliberately: an unverified entry silently trades the wrong instrument.
+expect("IB_SYMBOL_FIX holds exactly the verified entries",
+       IB_SYMBOL_FIX == {"PUIG.MC": "PUIG1"}, str(IB_SYMBOL_FIX))
+eq("Puig: IB's PUIG1 (Puig Brands B, ES0105777017) is tried first",
+   ib_symbol_candidates("PUIG.MC"), ["PUIG1", "PUIG"])
 
 # Euronext Dublin dropped 2026-08-30: 0/20 Irish names qualified at IB (no Dublin permission).
 # Guard against a silent re-add — every .IR name would re-enter the universe and fail every run,

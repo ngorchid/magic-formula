@@ -82,7 +82,9 @@ def ib_symbol_candidates(yf_ticker: str) -> list[str]:
 # Tickers where IB's symbol is not a formatting variant of yfinance's but a DIFFERENT symbol.
 # Only add entries VERIFIED against live IB — a wrong entry here silently trades the wrong
 # instrument, which is far worse than the unresolved-contract failure it replaces.
-IB_SYMBOL_FIX: dict[str, str] = {}
+IB_SYMBOL_FIX: dict[str, str] = {
+    "PUIG.MC": "PUIG1",   # Puig Brands B, ISIN ES0105777017 (verified at IB 2026-10-22)
+}
 
 
 # ccy -> (IB pair, is the ccy the BASE of that pair?). IB quotes minor currencies against USD
